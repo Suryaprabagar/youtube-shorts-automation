@@ -1,0 +1,106 @@
+name: YouTube Shorts Automation
+
+on:
+  # Run automatically 3 times per day (UTC times)
+  schedule:
+    - cron: '0 6 * * *'    # 06:00 UTC (11:30 AM IST)
+    - cron: '0 12 * * *'   # 12:00 UTC (05:30 PM IST)
+    - cron: '0 18 * * *'   # 18:00 UTC (11:30 PM IST)
+
+  # Allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — skip YouTube upload (true/false)'
+        required: false
+        default: 'false'
+
+# Prevent multiple runs from overlapping
+concurrency:
+  group: youtube-shorts-automation
+  cancel-in-progress: false
+
+jobs:
+  generate-and-upload:
+    name: Generate & Upload YouTube Short
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+    steps:
+      # ── 1. Checkout repository ──────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python 3.11 ───────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. Cache pip packages ───────────────────────────────────────────────
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # ── 4. Install system dependencies ─────────────────────────────────────
+      - name: Install system dependencies (FFmpeg)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+
+      # ── 5. Install Python packages ──────────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── 6. Verify environment ───────────────────────────────────────────────
+      - name: Verify environment
+        run: |
+          python -c "
+          import sys
+          print(f'Python: {sys.version}')
+          import moviepy; print(f'MoviePy: {moviepy.__version__}')
+          import gtts; print('gTTS: OK')
+          import openai; print(f'OpenAI SDK: {openai.__version__}')
+          import googleapiclient; print('Google API Client: OK')
+          print('All dependencies loaded successfully.')
+          "
+
+      # ── 7. Run the automation pipeline ─────────────────────────────────────
+      - name: Run YouTube Shorts automation pipeline
+        run: python main.py
+
+      # ── 8. Upload output artifacts (for debugging) ──────────────────────────
+      - name: Upload output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorts-output-${{ github.run_number }}
+          path: output/
+          retention-days: 3
+          if-no-files-found: ignore
+
+      # ── 9. Report success ───────────────────────────────────────────────────
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ YouTube Short generated and uploaded successfully!"
+          else
+            echo "❌ Pipeline failed. Check logs above for details."
+            exit 1
+          fi
