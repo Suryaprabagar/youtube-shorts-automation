@@ -73,8 +73,9 @@ class MetadataGenerator:
                 logger.info("Metadata generated — title: '%s'", metadata["title"])
                 return metadata
             except Exception as e:
-                if "404" in str(e) or "No endpoints" in str(e):
-                    logger.warning("Model '%s' unavailable, trying next...", model)
+                err = str(e)
+                if "404" in err or "429" in err or "No endpoints" in err or "rate-limit" in err.lower():
+                    logger.warning("Model '%s' unavailable (%s), trying next...", model, err[:60])
                     continue
                 raise
         logger.warning("All LLM models failed for metadata — using fallback.")
