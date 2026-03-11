@@ -61,7 +61,7 @@ class ScriptGenerator:
                 return self._call_model(topic, model)
             except Exception as e:
                 err = str(e)
-                if any(code in err for code in ["400", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower():
+                if any(code in err for code in ["400", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower() or "empty or none" in err.lower():
                     logger.warning("Model '%s' skipped (%s), trying next...", model, err[:80])
                     continue
                 raise
@@ -78,7 +78,10 @@ class ScriptGenerator:
             max_tokens=400,
             temperature=0.8,
         )
-        raw_script = response.choices[0].message.content.strip()
+        raw_content = response.choices[0].message.content
+        if not raw_content:
+            raise ValueError("Model returned empty or None content")
+        raw_script = raw_content.strip()
         script = self._clean_script(raw_script)
         word_count = len(script.split())
         logger.info("Script generated with '%s' — %d words.", model, word_count)

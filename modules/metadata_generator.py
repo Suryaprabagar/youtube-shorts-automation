@@ -68,13 +68,16 @@ class MetadataGenerator:
                     max_tokens=500,
                     temperature=0.7,
                 )
-                raw = response.choices[0].message.content.strip()
+                raw_content = response.choices[0].message.content
+                if not raw_content:
+                    raise ValueError("Model returned empty or None content")
+                raw = raw_content.strip()
                 metadata = self._parse_and_validate(raw, topic)
                 logger.info("Metadata generated — title: '%s'", metadata["title"])
                 return metadata
             except Exception as e:
                 err = str(e)
-                if any(code in err for code in ["400", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower():
+                if any(code in err for code in ["400", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower() or "empty or none" in err.lower():
                     logger.warning("Model '%s' skipped (%s), trying next...", model, err[:80])
                     continue
                 raise
