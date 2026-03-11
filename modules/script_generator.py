@@ -61,8 +61,8 @@ class ScriptGenerator:
                 return self._call_model(topic, model)
             except Exception as e:
                 err = str(e)
-                if "404" in err or "429" in err or "No endpoints" in err or "rate-limit" in err.lower():
-                    logger.warning("Model '%s' unavailable (%s), trying next...", model, err[:60])
+                if any(code in err for code in ["400", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower():
+                    logger.warning("Model '%s' skipped (%s), trying next...", model, err[:80])
                     continue
                 raise
         raise RuntimeError("All OpenRouter models unavailable.")
