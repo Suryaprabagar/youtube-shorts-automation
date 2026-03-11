@@ -77,7 +77,7 @@ class MetadataGenerator:
                 return metadata
             except Exception as e:
                 err = str(e)
-                if any(code in err for code in ["400", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower() or "empty or none" in err.lower():
+                if any(code in err for code in ["400", "402", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower() or "empty or none" in err.lower():
                     logger.warning("Model '%s' skipped (%s), trying next...", model, err[:80])
                     continue
                 raise
