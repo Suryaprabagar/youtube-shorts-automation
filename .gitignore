@@ -20,6 +20,11 @@ env/
 .env
 *.env.local
 
+# OAuth token files (NEVER commit these)
+youtube_tokens.json
+client_secret*.json
+token.json
+
 # Generated output (never commit videos/audio)
 output/
 *.mp4
