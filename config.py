@@ -37,15 +37,15 @@ FINAL_VIDEO_PATH = os.path.join(OUTPUT_DIR, "final_short.mp4")
 
 # ── API Endpoints ──────────────────────────────────────────────────────────────
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-# Primary model — mistral-7b is the most reliably available free model
-OPENROUTER_MODEL = "mistralai/mistral-7b-instruct:free"
+# Primary model — verified available via API query
+OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 # Ordered fallbacks tried automatically on 404, 400, or 429
 OPENROUTER_FALLBACK_MODELS = [
-    "qwen/qwen-2.5-7b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
-    "openchat/openchat-7b:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "meta-llama/llama-3.2-3b-instruct:free",
-    "nousresearch/nous-capybara-7b:free",
+    "openrouter/free", # Global fallback that autos-routes to any free model
 ]
 PEXELS_API_BASE = "https://api.pexels.com/videos/search"
 YOUTUBE_API_SERVICE_NAME = "youtube"
