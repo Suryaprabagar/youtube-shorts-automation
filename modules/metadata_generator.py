@@ -54,47 +54,31 @@ class MetadataGenerator:
             },
         )
 
-    @retry(
-        retry=retry_if_exception_type(Exception),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True,
-    )
     def generate(self, topic: str, script: str) -> dict:
-        """
-        Generate and return metadata dict with keys: title, description, tags.
-
-        Args:
-            topic: The video topic string.
-            script: The full voiceover script (used as context).
-
-        Returns:
-            dict with keys: 'title', 'description', 'tags'
-        """
-        # Send only first 300 chars of script as excerpt for brevity
+        """Try primary model then fallbacks. Falls back to hardcoded metadata if all fail."""
         script_excerpt = script[:300].strip()
-
-        logger.info("Generating metadata for topic: %s", topic)
-
-        response = self._client.chat.completions.create(
-            model=cfg.OPENROUTER_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": METADATA_PROMPT.format(
-                        topic=topic,
-                        script_excerpt=script_excerpt,
-                    ),
-                }
-            ],
-            max_tokens=500,
-            temperature=0.7,
-        )
-
-        raw = response.choices[0].message.content.strip()
-        metadata = self._parse_and_validate(raw, topic)
-        logger.info("Metadata generated — title: '%s'", metadata["title"])
-        return metadata
+        models_to_try = [cfg.OPENROUTER_MODEL] + cfg.OPENROUTER_FALLBACK_MODELS
+        for model in models_to_try:
+            try:
+                logger.info("Generating metadata with model: %s", model)
+                response = self._client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": METADATA_PROMPT.format(
+                        topic=topic, script_excerpt=script_excerpt)}],
+                    max_tokens=500,
+                    temperature=0.7,
+                )
+                raw = response.choices[0].message.content.strip()
+                metadata = self._parse_and_validate(raw, topic)
+                logger.info("Metadata generated — title: '%s'", metadata["title"])
+                return metadata
+            except Exception as e:
+                if "404" in str(e) or "No endpoints" in str(e):
+                    logger.warning("Model '%s' unavailable, trying next...", model)
+                    continue
+                raise
+        logger.warning("All LLM models failed for metadata — using fallback.")
+        return self._fallback_metadata(topic)
 
     def _parse_and_validate(self, raw: str, topic: str) -> dict:
         """Parse LLM JSON response and enforce YouTube character limits."""

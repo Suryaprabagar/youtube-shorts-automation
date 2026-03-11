@@ -37,7 +37,15 @@ FINAL_VIDEO_PATH = os.path.join(OUTPUT_DIR, "final_short.mp4")
 
 # ── API Endpoints ──────────────────────────────────────────────────────────────
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL = "meta-llama/llama-3-8b-instruct:free"   # free-tier model
+# Primary free model — updated from retired llama-3-8b to llama-3.1-8b
+OPENROUTER_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
+# Fallback models tried automatically if primary returns 404
+OPENROUTER_FALLBACK_MODELS = [
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "google/gemma-3-12b-it:free",
+    "deepseek/deepseek-r1:free",
+]
 PEXELS_API_BASE = "https://api.pexels.com/videos/search"
 YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"

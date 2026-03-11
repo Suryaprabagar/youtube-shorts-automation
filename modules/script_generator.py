@@ -52,18 +52,24 @@ class ScriptGenerator:
             },
         )
 
-    @retry(
-        retry=retry_if_exception_type(Exception),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True,
-    )
     def generate(self, topic: str) -> str:
-        """Generate and return a clean voiceover script string."""
-        logger.info("Generating script for topic: %s", topic)
+        """Try primary model then fallbacks, return first successful script."""
+        models_to_try = [cfg.OPENROUTER_MODEL] + cfg.OPENROUTER_FALLBACK_MODELS
+        for model in models_to_try:
+            try:
+                logger.info("Trying model: %s", model)
+                return self._call_model(topic, model)
+            except Exception as e:
+                if "404" in str(e) or "No endpoints" in str(e):
+                    logger.warning("Model '%s' unavailable, trying next...", model)
+                    continue
+                raise
+        raise RuntimeError("All OpenRouter models unavailable.")
 
+    def _call_model(self, topic: str, model: str) -> str:
+        """Call one model and return the cleaned script."""
         response = self._client.chat.completions.create(
-            model=cfg.OPENROUTER_MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT_TEMPLATE.format(topic=topic)},
@@ -71,18 +77,10 @@ class ScriptGenerator:
             max_tokens=400,
             temperature=0.8,
         )
-
         raw_script = response.choices[0].message.content.strip()
         script = self._clean_script(raw_script)
-
         word_count = len(script.split())
-        logger.info("Script generated — %d words.", word_count)
-
-        if word_count < 80:
-            logger.warning("Script seems short (%d words). May be under 45 seconds.", word_count)
-        elif word_count > 180:
-            logger.warning("Script may be too long (%d words). Trimming recommendation.", word_count)
-
+        logger.info("Script generated with '%s' — %d words.", model, word_count)
         return script
 
     @staticmethod
