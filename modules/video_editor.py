@@ -157,7 +157,7 @@ class VideoEditor:
         )
 
         # Cleanup clips
-        for clip in [final, audio_clip, bg_clip]:
+        for clip in [final, voice_clip, final_audio, bg_clip]:
             try:
                 clip.close()
             except Exception:
