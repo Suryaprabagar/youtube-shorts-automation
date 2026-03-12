@@ -14,10 +14,11 @@ gTTS==2.5.1
 requests==2.31.0
 
 # Video editing
-moviepy==1.0.3
-imageio==2.34.0
-imageio-ffmpeg==0.4.9
+moviepy==2.1.2
+imageio==2.34.1
+imageio-ffmpeg==0.5.1
 Pillow==10.3.0
+setuptools==69.5.1
 
 # Google / YouTube API
 google-api-python-client==2.128.0
