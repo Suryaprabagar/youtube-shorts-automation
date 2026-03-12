@@ -35,43 +35,82 @@ class VideoDownloader:
         self.api_key = api_key # Store api_key directly for use in _search_pexels
         self._headers = {"Authorization": api_key}
 
-    def generate_keyword(self, topic: str, script: str = None) -> str:
-        """Extract a short 1-3 word search keyword from the topic/script."""
-        # Prioritize the topic for the search keyword since it's more concise 
-        # and relevant than the first words of the script's hook.
-        text_to_analyze = topic
+    def generate_keywords(self, topic: str, script: str = None) -> tuple[str, str]:
+        """
+        Extract the best search keyword and a fallback category from the topic.
+        Returns: (primary_keyword, fallback_category)
+        """
+        fallback_category = "nature background"
         
+        # 1. Extract category if present (e.g., "[Space] ...")
+        category_match = re.match(r"^\[(.*?)\]", topic)
+        if category_match:
+            fallback_category = category_match.group(1).lower()
+            # Remove the category from the text we analyze
+            text_to_analyze = re.sub(r"^\[.*?\]", "", topic).strip()
+        else:
+            text_to_analyze = topic
+
+        # 2. Aggressive clickbait and common filler word filter
         stop_words = {
+            # Standard stop words
             "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
             "in", "on", "at", "to", "for", "of", "with", "that", "this", "you",
             "why", "how", "what", "when", "who", "your", "my", "our", "their",
             "will", "can", "do", "does", "from", "by", "as", "it", "its", "here",
+            "just", "like", "so", "very", "much", "many", "most", "some", "any", 
+            "all", "only", "also", "even", "more", "then", "than", "now", "out",
+            
+            # Clickbait / Hooks
             "crazy", "secret", "about", "did", "know", "untold", "truth", "stop",
-            "scrolling"
+            "scrolling", "terrifying", "discovery", "fact", "mind", "blowing",
+            "trick", "makes", "people", "trust", "instantly", "lies", "single",
+            "day", "rule", "changes", "decisions", "happens", "surprising", "reason",
+            "remember", "dreams", "rewire", "success", "days", "procrastinate",
+            "talking", "loud", "actually", "smarter", "strangest", "explained",
+            "seconds", "end", "mysterious", "outer", "powers", "fell", "scientific",
+            "feels", "faster", "older", "scientists", "discovered", "ancient",
+            "took", "centuries", "rediscover", "law", "sense", "small", "decision",
+            "changed", "entire", "course", "forgotten", "advanced", "burned",
+            "accidentally", "saved", "millions", "lives", "real", "story", "greatest",
+            "mysteries", "coincidence", "sounds", "impossible", "minute", "forever",
+            "waking", "productive", "journaling", "habit", "successful", "swear",
+            "learn", "skill", "twice", "fast", "using", "counterintuitive", "rest",
+            "students", "study", "less", "score", "higher", "compounds", "massive",
+            "results", "year", "overthinking", "better", "feature", "hiding", "ignore",
+            "works", "obsolete", "almost", "exist", "clever", "algorithm", "uses",
+            "keep", "watching", "protects", "passwords", "driving", "cars", "around",
+            "sneaky", "way", "apps", "drain", "battery", "exercise", "burns",
+            "calories", "running", "drinking", "first", "thing", "morning",
+            "everything", "position", "damages", "time", "fasting", "hours",
+            "simply", "superfood", "fights", "inflammation", "stress", "eat",
+            "breathing", "technique", "stay", "calm", "pressure", "fix", "minutes",
+            "compound", "interest", "turns", "dollars", "winners", "broke",
+            "budgeting", "millionaires", "save", "mistake", "probably", "making",
+            "right", "pay", "investing", "start", "week", "richest", "history",
+            "always", "common", "mindset", "shift", "separates", "wealthy", "everyone",
+            "else", "fresh", "long", "scientifically", "proven", "boost", "mood",
+            "search", "never", "memorize", "anything", "under", "method", "charge",
+            "percent", "fall", "asleep", "backed", "read", "without", "reading", "gets",
+            "nobody", "talks"
         }
         
-        # Strip punctuation and common words
+        # 3. Strip punctuation and split
         words = re.sub(r"[^a-zA-Z\s]", "", text_to_analyze).lower().split()
-        keywords = [w for w in words if w not in stop_words and len(w) > 2]
         
-        # If we have a series format "Tech Secrets #1: The quantum...", strip the title part
-        if "#" in topic and ":" in topic:
-            topic_core = topic.split(":", 1)[1].strip()
-            topic_words = re.sub(r"[^a-zA-Z\s]", "", topic_core).lower().split()
-            topic_keywords = [w for w in topic_words if w not in stop_words and len(w) > 2]
-            if topic_keywords:
-                query = " ".join(topic_keywords[:2])
-                logger.info("Pexels search keyword from topic core: '%s'", query)
-                return query
-
-        if keywords:
-            # Grab top most common/meaningful nouns empirically (just pick first 2-3)
-            query = " ".join(keywords[:2])
+        # 4. Keep only words that are not in the stop list and have length > 2
+        meaningful_words = [w for w in words if w not in stop_words and len(w) > 2]
+        
+        # 5. Build primary query from the last 2 meaningful words 
+        # (usually the subject of the sentence, like "black holes")
+        if meaningful_words:
+            # If there's only 1 word, use it. If more, take the last 2.
+            primary_query = " ".join(meaningful_words[-2:])
         else:
-            query = "nature background"
+            primary_query = fallback_category
             
-        logger.info("Pexels search keyword: '%s'", query)
-        return query
+        logger.info("Pexels keywords extracted -> primary: '%s', fallback: '%s'", primary_query, fallback_category)
+        return primary_query, fallback_category
 
     @retry(
         retry=retry_if_exception_type((requests.RequestException, RuntimeError)),
@@ -91,7 +130,7 @@ class VideoDownloader:
         Returns:
             Absolute path to the downloaded video.
         """
-        keyword = self.generate_keyword(topic, script)
+        keyword, fallback_category = self.generate_keywords(topic, script)
         
         # The _search_pexels method now returns the full data, not just the URL.
         # We need to adapt the call and subsequent logic.
@@ -101,14 +140,14 @@ class VideoDownloader:
             video_url = self._select_best_video_url(pexels_data.get("videos", []))
 
         if not video_url:
-            # Fallback: try with a generic keyword
-            logger.warning("No results for '%s', retrying with 'nature background'", keyword)
-            pexels_data_fallback = self._search_pexels("nature background")
+            # Fallback: try with the category extracted from the topic
+            logger.warning("No results for '%s', retrying with fallback '%s'", keyword, fallback_category)
+            pexels_data_fallback = self._search_pexels(fallback_category)
             if pexels_data_fallback:
                 video_url = self._select_best_video_url(pexels_data_fallback.get("videos", []))
 
         if not video_url:
-            raise RuntimeError("Could not find a suitable video on Pexels.")
+            raise RuntimeError(f"Could not find a suitable video on Pexels for '{keyword}' or '{fallback_category}'.")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         self._stream_download(video_url, output_path)
