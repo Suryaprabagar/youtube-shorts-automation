@@ -10,9 +10,17 @@ Strategy:
 
 import random
 import logging
+import traceback
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+try:
+    from pytrends.request import TrendReq
+    PYTRENDS_AVAILABLE = True
+except ImportError:
+    logger.warning("pytrends is not installed. Trending topics will be disabled.")
+    PYTRENDS_AVAILABLE = False
 
 # ── Topic pool ─────────────────────────────────────────────────────────────────
 TOPIC_POOL = [
@@ -99,17 +107,65 @@ TOPIC_POOL = [
 
 
 class TopicGenerator:
-    """Selects a random topic from the curated pool each run."""
+    """Selects a random topic from the curated pool or fetches a trending one."""
 
     def __init__(self):
         self._pool = TOPIC_POOL.copy()
+        if PYTRENDS_AVAILABLE:
+            # We use a longer timeout and fewer retries
+            self._pytrends = TrendReq(hl='en-US', tz=360, timeout=(10,25))
+        else:
+            self._pytrends = None
 
-    def generate(self) -> str:
-        """Return a randomly selected topic string."""
-        # Seed with current hour so cron runs within the same hour are stable
-        # but different cron windows get different topics
+    def _get_trending_topic(self) -> str | None:
+        """Attempt to fetch a trending topic from Google Trends related to our niches."""
+        if not self._pytrends:
+            return None
+            
+        try:
+            logger.info("Fetching real-time trending topics from Google Trends...")
+            # categories: all=all, b=business, e=entertainment, m=health/sci/tech, t=sci/tech
+            # Let's fetch tech/sci/health related daily trends if possible
+            realtime_df = self._pytrends.trending_searches(pn='united_states')
+            
+            if not realtime_df.empty:
+                trends = realtime_df[0].tolist()
+                
+                # Filter out obvious junk if needed, or just pick a random one
+                selected_trend = random.choice(trends[:10])
+                logger.info(f"Using trending topic keyword: {selected_trend}")
+                return f"The untold truth about {selected_trend}"
+                
+        except Exception as e:
+            logger.warning(f"Failed to fetch trending topics: {e}")
+            
+        return None
+
+    def generate(self, series_data: dict = None) -> str:
+        """
+        Return a topic string.
+        If series_data is provided, format it as a series title.
+        """
         seed = int(datetime.utcnow().strftime("%Y%m%d%H"))
         random.seed(seed)
-        topic = random.choice(self._pool)
-        logger.info("Selected topic: %s", topic)
-        return topic
+        
+        base_topic = None
+        
+        # 1. 30% chance to try for a trending topic (so we don't spam trends constantly)
+        if random.random() < 0.30:
+            base_topic = self._get_trending_topic()
+            
+        # 2. Fallback to our curated pool
+        if not base_topic:
+            base_topic = random.choice(self._pool)
+            
+        # 3. Format with Series Info if available
+        if series_data:
+            series_title = series_data.get("title", "Deep Dive")
+            ep_num = series_data.get("episode_number", 1)
+            final_topic = f"{series_title} #{ep_num}: {base_topic}"
+        else:
+            final_topic = base_topic
+
+        logger.info("Final selected topic: %s", final_topic)
+        return final_topic

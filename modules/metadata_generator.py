@@ -27,13 +27,13 @@ Script excerpt: {script_excerpt}
 
 Return ONLY valid JSON in exactly this format, no other text:
 {{
-  "title": "An engaging title under 70 characters with relevant emoji",
+  "titles": ["Title 1", "Title 2", "Title 3", "Title 4", "Title 5"],
   "description": "A 3-5 sentence description. Mention the key insight. Add 5-8 relevant hashtags at the end including #Shorts.",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8", "tag9", "tag10"]
 }}
 
 Rules:
-- Title: max 70 characters, must include one emoji, be click-worthy
+- Titles: Provide 5 highly engaging, curiosity-inducing viral titles. Max 60 characters each. Must include one emoji per title.
 - Description: engaging, SEO-friendly, end with hashtags
 - Tags: 10 single/two-word tags most relevant to the topic, no spaces within a tag
 """
@@ -99,12 +99,20 @@ class MetadataGenerator:
             return self._fallback_metadata(topic)
 
         # Ensure required keys exist
-        title = str(data.get("title", topic))[:TITLE_MAX_CHARS]
+        # Pick the best title out of the 5.
+        # Simple selection: just take the first one, or randomly select from top 3.
+        titles = data.get("titles", [])
+        if isinstance(titles, list) and len(titles) > 0:
+            import random
+            best_title = str(random.choice(titles[:3]))[:TITLE_MAX_CHARS]
+        else:
+            best_title = str(data.get("title", topic))[:TITLE_MAX_CHARS]
+
         description = str(data.get("description", f"Watch this Short about {topic}. #Shorts"))
         tags = data.get("tags", [])
 
-        # Ensure #Shorts is in description
-        if "#Shorts" not in description and "#shorts" not in description:
+        # Ensure #shorts is in description
+        if "#shorts" not in description.lower():
             description += "\n\n#Shorts #YouTubeShorts"
 
         # Trim description
@@ -114,6 +122,11 @@ class MetadataGenerator:
         if not isinstance(tags, list):
             tags = [topic.split()[0]]
         tags = [str(t).replace(" ", "").replace("#", "") for t in tags if t]
+        
+        # Ensure 'shorts' is in tags
+        if "shorts" not in [t.lower() for t in tags]:
+            tags.insert(0, "shorts")
+
         # Trim tags to fit within total character limit
         total_chars = 0
         valid_tags = []
@@ -125,7 +138,7 @@ class MetadataGenerator:
                 break
 
         return {
-            "title": title,
+            "title": best_title,
             "description": description,
             "tags": valid_tags,
         }
@@ -133,14 +146,14 @@ class MetadataGenerator:
     @staticmethod
     def _fallback_metadata(topic: str) -> dict:
         """Return safe default metadata if LLM fails."""
-        short_topic = topic[:60]
+        short_topic = topic[:50]
         return {
-            "title": f"🎯 {short_topic}"[:TITLE_MAX_CHARS],
+            "title": f"🎯 The Truth About {short_topic}"[:TITLE_MAX_CHARS],
             "description": (
                 f"Did you know? {topic}\n\n"
                 "Watch this YouTube Short to learn something amazing in under 60 seconds!\n\n"
                 "#Shorts #YouTubeShorts #Facts #Learning #Knowledge"
             ),
-            "tags": ["facts", "shorts", "learning", "knowledge", "tips",
-                     "interesting", "science", "mindblowing", "education", "did-you-know"],
+            "tags": ["shorts", "facts", "learning", "knowledge", "tips",
+                     "interesting", "science", "mindblowing", "education"],
         }

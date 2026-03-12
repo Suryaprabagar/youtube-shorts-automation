@@ -17,8 +17,15 @@ import logging
 import os
 import subprocess
 import textwrap
+import traceback
 from typing import Optional
 
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+    
 import config as cfg
 
 logger = logging.getLogger(__name__)
@@ -32,6 +39,15 @@ class VideoEditor:
         self.height = cfg.SHORTS_HEIGHT   # 1920
         self.fps = cfg.SHORTS_FPS         # 30
         self.max_duration = cfg.SHORTS_MAX_DURATION   # 59
+        
+        self.whisper_model = None
+        if WHISPER_AVAILABLE:
+            logger.info("Loading Whisper model (tiny) for subtitles...")
+            try:
+                # Use tiny/base to keep execution fast for GitHub Actions
+                self.whisper_model = whisper.load_model("tiny")
+            except Exception as e:
+                logger.error(f"Failed to load Whisper model: {e}")
 
     def edit(
         self,
@@ -84,9 +100,24 @@ class VideoEditor:
         bg_clip = VideoFileClip(video_path, audio=False)
         bg_clip = self._resize_crop(bg_clip, target_duration)
 
-        # Build title overlay
+        # Build layers
         layers = [bg_clip]
-        if topic:
+        
+        # If whisper is available, generate animated captions. 
+        # Otherwise fallback to the static title card.
+        captions_added = False
+        if self.whisper_model:
+            try:
+                caption_clips = self._generate_animated_captions(audio_path, target_duration)
+                if caption_clips:
+                    layers.extend(caption_clips)
+                    captions_added = True
+            except Exception as e:
+                logger.error(f"Captions failed: {e}")
+                logger.debug(traceback.format_exc())
+                
+        if not captions_added and topic:
+            logger.info("Using static title card fallback")
             title_layer = self._build_title_overlay(topic, target_duration)
             if title_layer:
                 layers.append(title_layer)
@@ -190,6 +221,60 @@ class VideoEditor:
         except Exception as e:
             logger.warning("Could not render title overlay: %s", e)
             return None
+
+    def _generate_animated_captions(self, audio_path: str, max_dur: float):
+        """
+        Uses Whisper to get word-level timestamps and creates TextClips for each word.
+        Returns a list of clips to layer onto the video.
+        """
+        from moviepy.editor import TextClip
+
+        logger.info("Transcribing audio for captions using Whisper...")
+        # Transcribe audio to get word-level alignment
+        result = self.whisper_model.transcribe(audio_path, word_timestamps=True)
+        
+        clips = []
+        for segment in result.get("segments", []):
+            for word_info in segment.get("words", []):
+                word_text = word_info["word"].strip()
+                start_time = word_info["start"]
+                end_time = word_info["end"]
+                
+                # Adjust to make it slightly snappier if we want, or add small buffer
+                if start_time >= max_dur:
+                    break
+                    
+                end_time = min(end_time, max_dur)
+                dur = end_time - start_time
+                if dur <= 0:
+                    continue
+
+                # Viral style: Large, center, bold, yellow/white text with stroke
+                try:
+                    # Note: We use method='caption' or just direct text
+                    tc = TextClip(
+                        word_text.upper(),
+                        fontsize=110,
+                        color="yellow",
+                        font="Impact",  # Or 'DejaVu-Sans-Bold' on Ubuntu runners
+                        stroke_color="black",
+                        stroke_width=5,
+                        method="label"
+                    ).set_position(("center", "center")).set_start(start_time).set_duration(dur)
+                    
+                    clips.append(tc)
+                except Exception as e:
+                    # If font fails, fallback to default font and no stroke (moviepy can be finicky)
+                    tc = TextClip(
+                        word_text.upper(),
+                        fontsize=90,
+                        color="yellow",
+                        bg_color="black"  # Alternative to stroke for visibility
+                    ).set_position(("center", "center")).set_start(start_time).set_duration(dur)
+                    clips.append(tc)
+
+        logger.info(f"Generated {len(clips)} animated word captions.")
+        return clips
 
     # ── FFmpeg fallback path ───────────────────────────────────────────────────
 

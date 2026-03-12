@@ -32,18 +32,40 @@ class VideoDownloader:
             raise ValueError("PEXELS_API_KEY is required for video download.")
         self._headers = {"Authorization": api_key}
 
-    def generate_keyword(self, topic: str) -> str:
-        """Extract a short 1-3 word search keyword from the topic string."""
-        # Remove common filler words and keep meaningful nouns/adjectives
+    def generate_keyword(self, topic: str, script: str = None) -> str:
+        """Extract a short 1-3 word search keyword from the topic/script."""
+        # Use script for context if available
+        text_to_analyze = script if script else topic
+        
         stop_words = {
             "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
             "in", "on", "at", "to", "for", "of", "with", "that", "this", "you",
             "why", "how", "what", "when", "who", "your", "my", "our", "their",
-            "will", "can", "do", "does", "from", "by", "as", "it", "its",
+            "will", "can", "do", "does", "from", "by", "as", "it", "its", "here",
+            "crazy", "secret", "about", "did", "know", "untold", "truth", "stop",
+            "scrolling"
         }
-        words = re.sub(r"[^a-zA-Z\s]", "", topic).lower().split()
-        keywords = [w for w in words if w not in stop_words]
-        query = " ".join(keywords[:3]) if keywords else topic[:30]
+        
+        # Strip punctuation and common words
+        words = re.sub(r"[^a-zA-Z\s]", "", text_to_analyze).lower().split()
+        keywords = [w for w in words if w not in stop_words and len(w) > 2]
+        
+        # If we have a series format "Tech Secrets #1: The quantum...", strip the title part
+        if "#" in topic and ":" in topic:
+            topic_core = topic.split(":", 1)[1].strip()
+            topic_words = re.sub(r"[^a-zA-Z\s]", "", topic_core).lower().split()
+            topic_keywords = [w for w in topic_words if w not in stop_words and len(w) > 2]
+            if topic_keywords:
+                query = " ".join(topic_keywords[:2])
+                logger.info("Pexels search keyword from topic core: '%s'", query)
+                return query
+
+        if keywords:
+            # Grab top most common/meaningful nouns empirically (just pick first 2-3)
+            query = " ".join(keywords[:2])
+        else:
+            query = "nature background"
+            
         logger.info("Pexels search keyword: '%s'", query)
         return query
 
@@ -53,18 +75,19 @@ class VideoDownloader:
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
     )
-    def download(self, topic: str, output_path: str = cfg.VIDEO_RAW_PATH) -> str:
+    def download(self, topic: str, script: str = None, output_path: str = cfg.VIDEO_RAW_PATH) -> str:
         """
         Search Pexels for a vertical video matching the topic and download it.
 
         Args:
             topic: Topic string used to derive a search keyword.
+            script: Optional script content for better keyword extraction.
             output_path: Where to save the downloaded video.
 
         Returns:
             Absolute path to the downloaded video.
         """
-        keyword = self.generate_keyword(topic)
+        keyword = self.generate_keyword(topic, script)
         video_url = self._search_pexels(keyword)
 
         if not video_url:
