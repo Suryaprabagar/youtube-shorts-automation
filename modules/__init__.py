@@ -9,6 +9,8 @@ from modules.video_downloader import VideoDownloader
 from modules.video_editor import VideoEditor
 from modules.metadata_generator import MetadataGenerator
 from modules.youtube_uploader import YouTubeUploader
+from modules.subtitle_generator import SubtitleGenerator
+from modules.youtube_analytics import YouTubeAnalytics
 
 __all__ = [
     "TopicGenerator",
@@ -18,4 +20,6 @@ __all__ = [
     "VideoEditor",
     "MetadataGenerator",
     "YouTubeUploader",
+    "SubtitleGenerator",
+    "YouTubeAnalytics",
 ]
