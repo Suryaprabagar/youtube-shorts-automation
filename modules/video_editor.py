@@ -15,6 +15,9 @@ Fallback engine: FFmpeg subprocess (if MoviePy fails)
 
 import logging
 import os
+import textwrap
+from typing import Optional
+
 import config as cfg
 from modules.subtitle_generator import SubtitleGenerator
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, CompositeAudioClip
