@@ -13,6 +13,8 @@ Primary engine: MoviePy
 Fallback engine: FFmpeg subprocess (if MoviePy fails)
 """
 
+import logging
+import os
 import config as cfg
 from modules.subtitle_generator import SubtitleGenerator
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, CompositeAudioClip
