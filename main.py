@@ -104,6 +104,7 @@ def run_pipeline(cfg: Config) -> None:
     final_video_path = editor.edit(
         video_path=video_path,
         audio_path=voice_path,
+        script=script,  # Pass the script for subtitles
         topic=topic,
     )
     logger.info("Final video saved: %s", final_video_path)

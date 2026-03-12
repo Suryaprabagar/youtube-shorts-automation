@@ -16,7 +16,13 @@ Fallback engine: FFmpeg subprocess (if MoviePy fails)
 import logging
 import os
 import textwrap
+import subprocess
 from typing import Optional
+import PIL.Image
+
+# Monkeypatch for MoviePy 1.0.3 + Pillow 10+ compatibility
+if not hasattr(PIL.Image, 'ANTIALIAS'):
+    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
 import config as cfg
 from modules.subtitle_generator import SubtitleGenerator
@@ -40,6 +46,7 @@ class VideoEditor:
         video_path: str = cfg.VIDEO_RAW_PATH,
         audio_path: str = cfg.VOICE_PATH,
         output_path: str = cfg.FINAL_VIDEO_PATH,
+        script: str = "",  # Added script
         topic: str = "",
     ) -> str:
         """
@@ -57,7 +64,7 @@ class VideoEditor:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         try:
-            return self._edit_with_moviepy(video_path, audio_path, output_path, topic)
+            return self._edit_with_moviepy(video_path, audio_path, output_path, script, topic)
         except Exception as e:
             logger.warning("MoviePy failed (%s). Falling back to FFmpeg.", e)
             return self._edit_with_ffmpeg(video_path, audio_path, output_path)
@@ -69,6 +76,7 @@ class VideoEditor:
         video_path: str,
         audio_path: str,
         output_path: str,
+        script: str,  # Added script
         topic: str,
     ) -> str:
         from moviepy.editor import (
@@ -114,10 +122,11 @@ class VideoEditor:
         # Add subtitles using manual SubtitleGenerator
         captions_added = False
         try:
-            caption_clips = self._generate_subtitles(script, target_duration)
-            if caption_clips:
-                layers.extend(caption_clips)
-                captions_added = True
+            if script:
+                caption_clips = self._generate_subtitles(script, target_duration)
+                if caption_clips:
+                    layers.extend(caption_clips)
+                    captions_added = True
         except Exception as e:
             logger.error(f"Captions failed: {e}")
                 
