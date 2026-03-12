@@ -67,24 +67,11 @@ jobs:
           pip install setuptools==69.5.1 wheel
           pip install -r requirements.txt
 
-      # ── 6. Verify environment ───────────────────────────────────────────────
-      - name: Verify environment
-        run: |
-          python -c "
-          import sys
-          print(f'Python: {sys.version}')
-          import moviepy; print(f'MoviePy: {moviepy.__version__}')
-          import gtts; print('gTTS: OK')
-          import openai; print(f'OpenAI SDK: {openai.__version__}')
-          import googleapiclient; print('Google API Client: OK')
-          print('All dependencies loaded successfully.')
-          "
-
-      # ── 7. Run the automation pipeline ─────────────────────────────────────
+      # ── 6. Run the automation pipeline ─────────────────────────────────────
       - name: Run YouTube Shorts automation pipeline
         run: python main.py
 
-      # ── 8. Upload output artifacts (for debugging) ──────────────────────────
+      # ── 7. Upload output artifacts (for debugging) ──────────────────────────
       - name: Upload output artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -93,14 +80,3 @@ jobs:
           path: output/
           retention-days: 3
           if-no-files-found: ignore
-
-      # ── 9. Report success ───────────────────────────────────────────────────
-      - name: Report status
-        if: always()
-        run: |
-          if [ "${{ job.status }}" == "success" ]; then
-            echo "✅ YouTube Short generated and uploaded successfully!"
-          else
-            echo "❌ Pipeline failed. Check logs above for details."
-            exit 1
-          fi

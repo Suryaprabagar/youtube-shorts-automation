@@ -37,8 +37,9 @@ class VideoDownloader:
 
     def generate_keyword(self, topic: str, script: str = None) -> str:
         """Extract a short 1-3 word search keyword from the topic/script."""
-        # Use script for context if available
-        text_to_analyze = script if script else topic
+        # Prioritize the topic for the search keyword since it's more concise 
+        # and relevant than the first words of the script's hook.
+        text_to_analyze = topic
         
         stop_words = {
             "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
