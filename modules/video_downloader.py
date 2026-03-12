@@ -10,6 +10,8 @@ import logging
 import os
 import re
 import requests
+import math
+from typing import Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 import config as cfg
@@ -30,6 +32,7 @@ class VideoDownloader:
     def __init__(self, api_key: str):
         if not api_key:
             raise ValueError("PEXELS_API_KEY is required for video download.")
+        self.api_key = api_key # Store api_key directly for use in _search_pexels
         self._headers = {"Authorization": api_key}
 
     def generate_keyword(self, topic: str, script: str = None) -> str:
@@ -88,12 +91,20 @@ class VideoDownloader:
             Absolute path to the downloaded video.
         """
         keyword = self.generate_keyword(topic, script)
-        video_url = self._search_pexels(keyword)
+        
+        # The _search_pexels method now returns the full data, not just the URL.
+        # We need to adapt the call and subsequent logic.
+        pexels_data = self._search_pexels(keyword)
+        video_url = None
+        if pexels_data:
+            video_url = self._select_best_video_url(pexels_data.get("videos", []))
 
         if not video_url:
             # Fallback: try with a generic keyword
             logger.warning("No results for '%s', retrying with 'nature background'", keyword)
-            video_url = self._search_pexels("nature background")
+            pexels_data_fallback = self._search_pexels("nature background")
+            if pexels_data_fallback:
+                video_url = self._select_best_video_url(pexels_data_fallback.get("videos", []))
 
         if not video_url:
             raise RuntimeError("Could not find a suitable video on Pexels.")
@@ -102,24 +113,33 @@ class VideoDownloader:
         self._stream_download(video_url, output_path)
         return output_path
 
-    def _search_pexels(self, keyword: str) -> str | None:
-        """Call Pexels API and return the download URL of the best matching video."""
+    @retry(
+        retry=retry_if_exception_type((Exception)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True
+    )
+    def _search_pexels(self, keyword: str) -> Optional[dict]:
+        """Call Pexels API to search for orientatation=portrait videos."""
+        url = "https://api.pexels.com/videos/search"
+        headers = {"Authorization": self.api_key}
+        # Request a few more results since we'll try to find an exact matching short one
         params = {
-            "query": keyword,
-            "orientation": "portrait",
-            "size": "medium",
-            "per_page": 15,
+            "query": keyword, # Removed 'background' from query to allow broader exact matching
+            "per_page": 10,
+            "orientation": "portrait"
         }
-        resp = requests.get(
-            PEXELS_SEARCH_URL,
-            headers=self._headers,
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
         resp.raise_for_status()
+        
         data = resp.json()
-        videos = data.get("videos", [])
+        if not data.get("videos"):
+            logger.warning("No Pexels videos found for keyword '%s'", keyword)
+            return None
+        return data
 
+    def _select_best_video_url(self, videos: list) -> str | None:
+        """Selects the best video URL from a list of Pexels video objects."""
         if not videos:
             return None
 

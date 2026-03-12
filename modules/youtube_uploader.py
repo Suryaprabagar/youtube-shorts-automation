@@ -12,12 +12,16 @@ import logging
 import os
 import time
 import json
+import socket
 import requests as http_requests
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.errors import HttpError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from typing import Optional
 
 import config as cfg
 
@@ -71,11 +75,23 @@ class YouTubeUploader:
         )
 
     @retry(
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception_type((HttpError, socket.error, IOError)),
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=2, min=5, max=30),
-        reraise=True,
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True
     )
+    def _execute_upload(self, request) -> str:
+        """Executes the resumable upload request with retry logic."""
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                progress = int(status.progress() * 100)
+                logger.info(f"Upload progress: {progress}%")
+        
+        video_id = response.get("id")
+        return video_id
+
     def upload(
         self,
         video_path: str,
@@ -87,17 +103,6 @@ class YouTubeUploader:
     ) -> str:
         """
         Upload a video to YouTube.
-
-        Args:
-            video_path: Local path to the MP4 file.
-            title: Video title (max 100 chars).
-            description: Video description (max 5000 chars).
-            tags: List of tag strings.
-            category_id: YouTube category ID (default: 22 = People & Blogs).
-            privacy_status: 'public', 'unlisted', or 'private'.
-
-        Returns:
-            YouTube video ID of the uploaded video.
         """
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -143,27 +148,3 @@ class YouTubeUploader:
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         logger.info("✅ Upload successful! Video URL: %s", video_url)
         return video_id
-
-    def _execute_upload(self, request) -> str:
-        """Execute a resumable upload with progress logging and retry on transient errors."""
-        response = None
-        retries = 0
-        max_retries = 10
-
-        while response is None:
-            try:
-                status, response = request.next_chunk()
-                if status:
-                    pct = int(status.progress() * 100)
-                    logger.info("Upload progress: %d%%", pct)
-            except Exception as e:
-                if retries >= max_retries:
-                    raise
-                retries += 1
-                sleep_time = 2 ** retries
-                logger.warning("Upload chunk error (attempt %d): %s. Retrying in %ds...", retries, e, sleep_time)
-                time.sleep(sleep_time)
-
-        if response and "id" in response:
-            return response["id"]
-        raise RuntimeError(f"Upload completed but no video ID in response: {response}")

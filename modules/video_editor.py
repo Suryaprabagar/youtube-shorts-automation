@@ -13,20 +13,10 @@ Primary engine: MoviePy
 Fallback engine: FFmpeg subprocess (if MoviePy fails)
 """
 
-import logging
-import os
-import subprocess
-import textwrap
-import traceback
-from typing import Optional
-
-try:
-    import whisper
-    WHISPER_AVAILABLE = True
-except ImportError:
-    WHISPER_AVAILABLE = False
-    
 import config as cfg
+from modules.subtitle_generator import SubtitleGenerator
+from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, CompositeAudioClip
+from moviepy.audio.fx.all import audio_loop, volumex
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +28,7 @@ class VideoEditor:
         self.width = cfg.SHORTS_WIDTH     # 1080
         self.height = cfg.SHORTS_HEIGHT   # 1920
         self.fps = cfg.SHORTS_FPS         # 30
-        self.max_duration = cfg.SHORTS_MAX_DURATION   # 59
-        
-        self.whisper_model = None
-        if WHISPER_AVAILABLE:
-            logger.info("Loading Whisper model (tiny) for subtitles...")
-            try:
-                # Use tiny/base to keep execution fast for GitHub Actions
-                self.whisper_model = whisper.load_model("tiny")
-            except Exception as e:
-                logger.error(f"Failed to load Whisper model: {e}")
+        self.max_duration = min(10.0, cfg.SHORTS_MAX_DURATION)  # STRICT 10 seconds max
 
     def edit(
         self,
@@ -92,9 +73,31 @@ class VideoEditor:
 
         logger.info("Editing video with MoviePy...")
 
-        # Load audio and clamp duration
-        audio_clip = AudioFileClip(audio_path)
-        target_duration = min(audio_clip.duration, self.max_duration)
+        # Load audio and clamp duration (stricly limit to 6-10 seconds)
+        voice_clip = AudioFileClip(audio_path)
+        # We enforce a hard cut-off to meet short constraints
+        target_duration = min(voice_clip.duration, self.max_duration)
+        if target_duration < 6.0:
+            logger.warning("Audio duration %ss is less than 6s constraint.", target_duration)
+        
+        voice_clip = voice_clip.subclip(0, target_duration)
+
+        # Mix with Background Music if available
+        bg_music_path = "assets/bg_music.mp3"
+        if os.path.exists(bg_music_path):
+            try:
+                bg_music_clip = AudioFileClip(bg_music_path)
+                # Loop music to match target duration, and lower volume significantly
+                bg_music_clip = audio_loop(bg_music_clip, duration=target_duration)
+                bg_music_clip = volumex(bg_music_clip, 0.1) # 10% volume
+                
+                final_audio = CompositeAudioClip([voice_clip, bg_music_clip])
+                logger.info("Successfully mixed voiceover with background music.")
+            except Exception as e:
+                logger.error(f"Failed to mix background music: {e}")
+                final_audio = voice_clip
+        else:
+            final_audio = voice_clip
 
         # Load + resize + crop background video
         bg_clip = VideoFileClip(video_path, audio=False)
@@ -103,18 +106,15 @@ class VideoEditor:
         # Build layers
         layers = [bg_clip]
         
-        # If whisper is available, generate animated captions. 
-        # Otherwise fallback to the static title card.
+        # Add subtitles using manual SubtitleGenerator
         captions_added = False
-        if self.whisper_model:
-            try:
-                caption_clips = self._generate_animated_captions(audio_path, target_duration)
-                if caption_clips:
-                    layers.extend(caption_clips)
-                    captions_added = True
-            except Exception as e:
-                logger.error(f"Captions failed: {e}")
-                logger.debug(traceback.format_exc())
+        try:
+            caption_clips = self._generate_subtitles(script, target_duration)
+            if caption_clips:
+                layers.extend(caption_clips)
+                captions_added = True
+        except Exception as e:
+            logger.error(f"Captions failed: {e}")
                 
         if not captions_added and topic:
             logger.info("Using static title card fallback")
@@ -124,7 +124,7 @@ class VideoEditor:
 
         # Composite + attach audio
         final = CompositeVideoClip(layers, size=(self.width, self.height))
-        final = final.set_audio(audio_clip.subclip(0, target_duration))
+        final = final.set_audio(final_audio)
         final = final.set_duration(target_duration)
 
         # Export
@@ -222,58 +222,48 @@ class VideoEditor:
             logger.warning("Could not render title overlay: %s", e)
             return None
 
-    def _generate_animated_captions(self, audio_path: str, max_dur: float):
+    def _generate_subtitles(self, script_text: str, duration: float):
         """
-        Uses Whisper to get word-level timestamps and creates TextClips for each word.
+        Uses SubtitleGenerator to chunk text and creates TextClips for each phrase.
         Returns a list of clips to layer onto the video.
         """
         from moviepy.editor import TextClip
-
-        logger.info("Transcribing audio for captions using Whisper...")
-        # Transcribe audio to get word-level alignment
-        result = self.whisper_model.transcribe(audio_path, word_timestamps=True)
+        
+        generator = SubtitleGenerator()
+        subtitles_data = generator.generate(script_text, duration)
         
         clips = []
-        for segment in result.get("segments", []):
-            for word_info in segment.get("words", []):
-                word_text = word_info["word"].strip()
-                start_time = word_info["start"]
-                end_time = word_info["end"]
+        for start_time, end_time, text in subtitles_data:
+            dur = end_time - start_time
+            if dur <= 0:
+                continue
                 
-                # Adjust to make it slightly snappier if we want, or add small buffer
-                if start_time >= max_dur:
-                    break
-                    
-                end_time = min(end_time, max_dur)
-                dur = end_time - start_time
-                if dur <= 0:
-                    continue
-
+            try:
                 # Viral style: Large, center, bold, yellow/white text with stroke
-                try:
-                    # Note: We use method='caption' or just direct text
-                    tc = TextClip(
-                        word_text.upper(),
-                        fontsize=110,
-                        color="yellow",
-                        font="Impact",  # Or 'DejaVu-Sans-Bold' on Ubuntu runners
-                        stroke_color="black",
-                        stroke_width=5,
-                        method="label"
-                    ).set_position(("center", "center")).set_start(start_time).set_duration(dur)
-                    
-                    clips.append(tc)
-                except Exception as e:
-                    # If font fails, fallback to default font and no stroke (moviepy can be finicky)
-                    tc = TextClip(
-                        word_text.upper(),
-                        fontsize=90,
-                        color="yellow",
-                        bg_color="black"  # Alternative to stroke for visibility
-                    ).set_position(("center", "center")).set_start(start_time).set_duration(dur)
-                    clips.append(tc)
+                tc = TextClip(
+                    text.upper(),
+                    fontsize=100,
+                    color="yellow",
+                    font="Impact",  # Or 'DejaVu-Sans-Bold'
+                    stroke_color="black",
+                    stroke_width=5,
+                    method="caption",
+                    size=(self.width * 0.9, None)  # Wrap to screen width
+                ).set_position(("center", "center")).set_start(start_time).set_duration(dur)
+                clips.append(tc)
+            except Exception as e:
+                # Fallback style
+                tc = TextClip(
+                    text.upper(),
+                    fontsize=80,
+                    color="yellow",
+                    bg_color="black",
+                    method="caption",
+                    size=(self.width * 0.9, None)
+                ).set_position(("center", "center")).set_start(start_time).set_duration(dur)
+                clips.append(tc)
 
-        logger.info(f"Generated {len(clips)} animated word captions.")
+        logger.info(f"Generated {len(clips)} subtitle overlays.")
         return clips
 
     # ── FFmpeg fallback path ───────────────────────────────────────────────────

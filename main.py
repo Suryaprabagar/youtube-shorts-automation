@@ -26,7 +26,6 @@ from modules.video_downloader import VideoDownloader
 from modules.video_editor import VideoEditor
 from modules.metadata_generator import MetadataGenerator
 from modules.youtube_uploader import YouTubeUploader
-from modules.series_manager import SeriesManager
 from modules.youtube_analytics import YouTubeAnalytics
 
 # ── Root logger ────────────────────────────────────────────────────────────────
@@ -46,22 +45,39 @@ def run_pipeline(cfg: Config) -> None:
     logger.info("🚀 Starting YouTube Shorts automation pipeline")
     logger.info("=" * 60)
 
-    # ── Step 0: Analytics & Series Management ──────────────────────────────────
-    logger.info("\n📊 STEP 0/7 — Analyzing data & selecting series...")
+    # ── Step 0: Analytics & Category Management ──────────────────────────────────
+    logger.info("\n📊 STEP 0/7 — Analyzing data & selecting category...")
+    
+    # 0.1 Category Rotation Logic
+    categories = ["space", "animals", "science", "technology", "psychology"]
+    
+    # Try to grab the GitHub Actions run number. If running locally, default to a random choice or file.
+    import os
+    run_number_str = os.environ.get("GITHUB_RUN_NUMBER")
+    if run_number_str and run_number_str.isdigit():
+        run_number = int(run_number_str)
+        category_index = run_number % len(categories)
+        selected_category = categories[category_index]
+        logger.info(f"GitHub Run Number {run_number} detected. Selected Category: {selected_category}")
+    else:
+        import random
+        selected_category = random.choice(categories)
+        logger.info(f"Local run detected. Randomly selected Category: {selected_category}")
+
+    # 0.2 Analytics (Optional bias factor we can log)
     analytics = YouTubeAnalytics(
         client_id=cfg.youtube_client_id,
         client_secret=cfg.youtube_client_secret,
         refresh_token=cfg.youtube_refresh_token,
     )
     best_series_id = analytics.update_analytics()
-    
-    series_mgr = SeriesManager()
-    series_data = series_mgr.select_next_series(bias_series_id=best_series_id)
+    if best_series_id:
+        logger.info(f"Analytics suggests '{best_series_id}' performs best, but we are honoring category rotation.")
 
     # ── Step 1: Generate Topic ─────────────────────────────────────────────────
     logger.info("\n📌 STEP 1/7 — Generating topic...")
     topic_gen = TopicGenerator()
-    topic = topic_gen.generate(series_data=series_data)
+    topic = topic_gen.generate(category=selected_category)
     logger.info("Topic: %s", topic)
 
     # ── Step 2: Generate Script ────────────────────────────────────────────────
@@ -114,9 +130,6 @@ def run_pipeline(cfg: Config) -> None:
         category_id=cfg.video_category_id,
         privacy_status=cfg.video_privacy,
     )
-    
-    # ── Step 8: Commit state on success ────────────────────────────────────────
-    series_mgr.commit_episode(series_id=series_data["id"], new_episode_number=series_data["episode_number"])
 
     logger.info("\n" + "=" * 60)
     logger.info("✅ Pipeline complete!")

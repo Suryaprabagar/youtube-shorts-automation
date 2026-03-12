@@ -141,31 +141,36 @@ class TopicGenerator:
             
         return None
 
-    def generate(self, series_data: dict = None) -> str:
+    def generate(self, category: str = "science") -> str:
         """
         Return a topic string.
-        If series_data is provided, format it as a series title.
+        Optionally uses the provided category to bias the topic.
         """
         seed = int(datetime.utcnow().strftime("%Y%m%d%H"))
         random.seed(seed)
         
         base_topic = None
         
-        # 1. 30% chance to try for a trending topic (so we don't spam trends constantly)
+        # 1. 30% chance to try for a trending topic
         if random.random() < 0.30:
             base_topic = self._get_trending_topic()
             
         # 2. Fallback to our curated pool
         if not base_topic:
-            base_topic = random.choice(self._pool)
+            # Filter pool by category if we can roughly match, or just use the random pool
+            # Categories: space, animals, science, technology, psychology
+            if category.lower() == "space":
+                base_topic = "A terrifying discovery about black holes"
+            elif category.lower() == "animals":
+                base_topic = "The immortal jellyfish that lives forever"
+            elif category.lower() == "technology":
+                base_topic = "The hidden AI code inside your phone"
+            elif category.lower() == "psychology":
+                base_topic = "Why your brain secretly lies to you"
+            else:
+                base_topic = random.choice(self._pool)
             
-        # 3. Format with Series Info if available
-        if series_data:
-            series_title = series_data.get("title", "Deep Dive")
-            ep_num = series_data.get("episode_number", 1)
-            final_topic = f"{series_title} #{ep_num}: {base_topic}"
-        else:
-            final_topic = base_topic
+        final_topic = f"[{category.capitalize()}] {base_topic}"
 
         logger.info("Final selected topic: %s", final_topic)
         return final_topic

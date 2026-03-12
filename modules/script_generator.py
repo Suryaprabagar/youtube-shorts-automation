@@ -27,12 +27,17 @@ USER_PROMPT_TEMPLATE = """Write a YouTube Shorts voiceover script on this topic:
 Topic: {topic}
 
 Requirements:
-- Target length: STRICTLY MAXIMUM 60 WORDS.
-- Must start with a VERY strong verbal hook in the first sentence to grab attention.
-- Use curiosity-based storytelling. Build tension or reveal a surprising fact.
-- Tone: fast-paced, engaging, conversational, and energetic.
-- Do NOT include scene directions, [MUSIC], [CUT], or any production notes.
-- Output ONLY the voiceover text, nothing else.
+- Target length: STRICTLY MAXIMUM 40 WORDS. (extremely short)
+- You MUST follow this exact 3-part structure, with no extra filler:
+  1. HOOK (first 2-3 seconds, incredibly catchy/viral)
+  2. MAIN FACT (the core information)
+  3. CURIOSITY ENDING (make them want to watch again or think)
+- Tone: fast-paced, engaging, conversational.
+- Do NOT include scene directions, timestamps, headers, [MUSIC], [CUT], or any production notes.
+- Output ONLY the raw voiceover text to be spoken, nothing else.
+
+Example structure:
+"This animal can survive without oxygen. Scientists discovered a jellyfish that doesn't need air to live. And the reason is absolutely terrifying."
 """
 
 
@@ -51,23 +56,32 @@ class ScriptGenerator:
             },
         )
 
+    @retry(
+        retry=retry_if_exception_type((Exception)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=False
+    )
     def generate(self, topic: str) -> str:
         """Try primary model then fallbacks, return first successful script."""
         models_to_try = [cfg.OPENROUTER_MODEL] + cfg.OPENROUTER_FALLBACK_MODELS
-        for model in models_to_try:
-            try:
-                logger.info("Trying model: %s", model)
-                return self._call_model(topic, model)
-            except Exception as e:
-                err = str(e)
-                if any(code in err for code in ["400", "402", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower() or "empty or none" in err.lower():
-                    logger.warning("Model '%s' skipped (%s), trying next...", model, err[:80])
-                    continue
-                logger.error("Model '%s' failed unexpectedly: %s", model, err)
-                
-        logger.error("All OpenRouter models failed or were unavailable.")
-        logger.warning("Using hardcoded fallback script to prevent pipeline crash.")
-        return self._get_fallback_script(topic)
+        try:
+            for model in models_to_try:
+                try:
+                    logger.info("Trying model: %s", model)
+                    return self._call_model(topic, model)
+                except Exception as e:
+                    err = str(e)
+                    if any(code in err for code in ["400", "402", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower() or "empty or none" in err.lower():
+                        logger.warning("Model '%s' skipped (%s), trying next...", model, err[:80])
+                        continue
+                    logger.error("Model '%s' failed unexpectedly: %s", model, err)
+                    
+            logger.error("All OpenRouter models failed or were unavailable.")
+            raise RuntimeError("APIs failed")
+        except Exception as e:
+            logger.warning("Using hardcoded fallback script to prevent pipeline crash.")
+            return self._get_fallback_script(topic)
 
     def _get_fallback_script(self, topic: str) -> str:
         """In case LLM API completely fails, return a generic working script."""

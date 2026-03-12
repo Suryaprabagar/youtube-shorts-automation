@@ -20,22 +20,19 @@ TITLE_MAX_CHARS = 100
 DESCRIPTION_MAX_CHARS = 5000
 TAGS_MAX_TOTAL_CHARS = 500
 
-METADATA_PROMPT = """Generate YouTube Shorts metadata for a video about this topic:
+METADATA_PROMPT_TEMPLATE = """Generate metadata for a YouTube Short.
 
 Topic: {topic}
-Script excerpt: {script_excerpt}
+Script: {script}
 
-Return ONLY valid JSON in exactly this format, no other text:
+Respond ONLY with raw JSON in this exact structure:
 {{
-  "titles": ["Title 1", "Title 2", "Title 3", "Title 4", "Title 5"],
-  "description": "A 3-5 sentence description. Mention the key insight. Add 5-8 relevant hashtags at the end including #Shorts.",
-  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8", "tag9", "tag10"]
+  "titles": [
+    "5 options for a curiosity-driven title under 60 characters total, ending with #Shorts"
+  ],
+  "description": "2-3 sentences max. Include 3 relevant keywords.",
+  "tags": ["5", "to", "8", "single", "word", "tags", "shorts"]
 }}
-
-Rules:
-- Titles: Provide 5 highly engaging, curiosity-inducing viral titles. Max 60 characters each. Must include one emoji per title.
-- Description: engaging, SEO-friendly, end with hashtags
-- Tags: 10 single/two-word tags most relevant to the topic, no spaces within a tag
 """
 
 
@@ -54,35 +51,52 @@ class MetadataGenerator:
             },
         )
 
-    def generate(self, topic: str, script: str) -> dict:
-        """Try primary model then fallbacks. Falls back to hardcoded metadata if all fail."""
+    @retry(
+        retry=retry_if_exception_type((Exception)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=False
+    )
+    def _call_model(self, topic: str, script: str, model: str) -> dict:
+        """Internal method to call the LLM for metadata generation."""
         script_excerpt = script[:300].strip()
+        logger.info("Generating metadata with model: %s", model)
+        response = self._client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": METADATA_PROMPT_TEMPLATE.format(
+                topic=topic, script=script_excerpt)}],
+            max_tokens=500,
+            temperature=0.7,
+        )
+        raw_content = response.choices[0].message.content
+        if not raw_content:
+            raise ValueError("Model returned empty or None content")
+        raw = raw_content.strip()
+        metadata = self._parse_and_validate(raw, topic)
+        logger.info("Metadata generated — title: '%s'", metadata["title"])
+        return metadata
+
+    def generate(self, topic: str, script: str) -> dict:
+        """Fetch metadata, handle errors, returning a structured dict."""
+        
         models_to_try = [cfg.OPENROUTER_MODEL] + cfg.OPENROUTER_FALLBACK_MODELS
-        for model in models_to_try:
-            try:
-                logger.info("Generating metadata with model: %s", model)
-                response = self._client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": METADATA_PROMPT.format(
-                        topic=topic, script_excerpt=script_excerpt)}],
-                    max_tokens=500,
-                    temperature=0.7,
-                )
-                raw_content = response.choices[0].message.content
-                if not raw_content:
-                    raise ValueError("Model returned empty or None content")
-                raw = raw_content.strip()
-                metadata = self._parse_and_validate(raw, topic)
-                logger.info("Metadata generated — title: '%s'", metadata["title"])
-                return metadata
-            except Exception as e:
-                err = str(e)
-                if any(code in err for code in ["400", "402", "404", "429"]) or "No endpoints" in err or "rate-limit" in err.lower() or "empty or none" in err.lower():
-                    logger.warning("Model '%s' skipped (%s), trying next...", model, err[:80])
-                    continue
-                raise
-        logger.warning("All LLM models failed for metadata — using fallback.")
-        return self._fallback_metadata(topic)
+        
+        try:
+            for model in models_to_try:
+                try:
+                    logger.info("Trying model '%s' for metadata...", model)
+                    return self._call_model(topic, script, model)
+                except Exception as e:
+                    err = str(e)
+                    if any(code in err for code in ["400", "402", "404", "429"]) or "No endpoints" in err:
+                        logger.warning("Model '%s' skipped (%s)", model, err[:80])
+                        continue
+                    logger.error("Metadata generator failed on model '%s': %s", model, err)
+                    
+            logger.error("All OpenRouter models failed for metadata.")
+            raise RuntimeError("API failed")
+        except Exception:
+            return self._fallback_metadata(topic)
 
     def _parse_and_validate(self, raw: str, topic: str) -> dict:
         """Parse LLM JSON response and enforce YouTube character limits."""
@@ -146,14 +160,9 @@ class MetadataGenerator:
     @staticmethod
     def _fallback_metadata(topic: str) -> dict:
         """Return safe default metadata if LLM fails."""
-        short_topic = topic[:50]
+        fallback_topic = topic[:30] if topic else "Amazing Fact"
         return {
-            "title": f"🎯 The Truth About {short_topic}"[:TITLE_MAX_CHARS],
-            "description": (
-                f"Did you know? {topic}\n\n"
-                "Watch this YouTube Short to learn something amazing in under 60 seconds!\n\n"
-                "#Shorts #YouTubeShorts #Facts #Learning #Knowledge"
-            ),
-            "tags": ["shorts", "facts", "learning", "knowledge", "tips",
-                     "interesting", "science", "mindblowing", "education"],
+            "title": f"The Truth About {fallback_topic} #Shorts",
+            "description": f"Did you know this about {topic}? Like and subscribe for more amazing daily facts! #shorts #viral #facts",
+            "tags": ["shorts", "viral", "facts", "interesting", "trending"]
         }
