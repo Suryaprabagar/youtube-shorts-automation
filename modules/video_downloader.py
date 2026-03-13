@@ -38,76 +38,43 @@ class VideoDownloader:
     def generate_keywords(self, topic: str, script: str = None) -> tuple[str, str]:
         """
         Extract the best search keyword and a fallback category from the topic.
+        Since this is a space channel, we force the fallback to 'space' or 'galaxy'.
         Returns: (primary_keyword, fallback_category)
         """
-        fallback_category = "nature background"
+        fallback_category = "space"
         
-        # 1. Extract category if present (e.g., "[Space] ...")
-        category_match = re.match(r"^\[(.*?)\]", topic)
-        if category_match:
-            fallback_category = category_match.group(1).lower()
-            # Remove the category from the text we analyze
-            text_to_analyze = re.sub(r"^\[.*?\]", "", topic).strip()
-        else:
-            text_to_analyze = topic
-
-        # 2. Aggressive clickbait and common filler word filter
-        stop_words = {
-            # Standard stop words
-            "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
-            "in", "on", "at", "to", "for", "of", "with", "that", "this", "you",
-            "why", "how", "what", "when", "who", "your", "my", "our", "their",
-            "will", "can", "do", "does", "from", "by", "as", "it", "its", "here",
-            "just", "like", "so", "very", "much", "many", "most", "some", "any", 
-            "all", "only", "also", "even", "more", "then", "than", "now", "out",
+        # Space-specific terms to look for
+        space_terms = [
+            "space", "galaxy", "nebula", "astronaut", "planet",
+            "milky way", "universe", "stars", "cosmos", "black hole",
+            "solar system", "moon", "sun", "supernova", "telescope"
+        ]
+        
+        # 1. Search the raw topic and script for these terms directly first
+        text_to_analyze = topic.lower()
+        if script:
+            text_to_analyze += " " + script.lower()
             
-            # Clickbait / Hooks
-            "crazy", "secret", "about", "did", "know", "untold", "truth", "stop",
-            "scrolling", "terrifying", "discovery", "fact", "mind", "blowing",
-            "trick", "makes", "people", "trust", "instantly", "lies", "single",
-            "day", "rule", "changes", "decisions", "happens", "surprising", "reason",
-            "remember", "dreams", "rewire", "success", "days", "procrastinate",
-            "talking", "loud", "actually", "smarter", "strangest", "explained",
-            "seconds", "end", "mysterious", "outer", "powers", "fell", "scientific",
-            "feels", "faster", "older", "scientists", "discovered", "ancient",
-            "took", "centuries", "rediscover", "law", "sense", "small", "decision",
-            "changed", "entire", "course", "forgotten", "advanced", "burned",
-            "accidentally", "saved", "millions", "lives", "real", "story", "greatest",
-            "mysteries", "coincidence", "sounds", "impossible", "minute", "forever",
-            "waking", "productive", "journaling", "habit", "successful", "swear",
-            "learn", "skill", "twice", "fast", "using", "counterintuitive", "rest",
-            "students", "study", "less", "score", "higher", "compounds", "massive",
-            "results", "year", "overthinking", "better", "feature", "hiding", "ignore",
-            "works", "obsolete", "almost", "exist", "clever", "algorithm", "uses",
-            "keep", "watching", "protects", "passwords", "driving", "cars", "around",
-            "sneaky", "way", "apps", "drain", "battery", "exercise", "burns",
-            "calories", "running", "drinking", "first", "thing", "morning",
-            "everything", "position", "damages", "time", "fasting", "hours",
-            "simply", "superfood", "fights", "inflammation", "stress", "eat",
-            "breathing", "technique", "stay", "calm", "pressure", "fix", "minutes",
-            "compound", "interest", "turns", "dollars", "winners", "broke",
-            "budgeting", "millionaires", "save", "mistake", "probably", "making",
-            "right", "pay", "investing", "start", "week", "richest", "history",
-            "always", "common", "mindset", "shift", "separates", "wealthy", "everyone",
-            "else", "fresh", "long", "scientifically", "proven", "boost", "mood",
-            "search", "never", "memorize", "anything", "under", "method", "charge",
-            "percent", "fall", "asleep", "backed", "read", "without", "reading", "gets",
-            "nobody", "talks"
-        }
-        
-        # 3. Strip punctuation and split
-        words = re.sub(r"[^a-zA-Z\s]", "", text_to_analyze).lower().split()
-        
-        # 4. Keep only words that are not in the stop list and have length > 2
-        meaningful_words = [w for w in words if w not in stop_words and len(w) > 2]
-        
-        # 5. Build primary query from the last 2 meaningful words 
-        # (usually the subject of the sentence, like "black holes")
-        if meaningful_words:
-            # If there's only 1 word, use it. If more, take the last 2.
-            primary_query = " ".join(meaningful_words[-2:])
-        else:
-            primary_query = fallback_category
+        for term in ["black hole", "milky way", "solar system"]:  # Check multi-word first
+            if term in text_to_analyze:
+                logger.info("Pexels keywords extracted -> primary: '%s', fallback: '%s'", term, fallback_category)
+                return term, fallback_category
+                
+        for term in space_terms:
+            if term in text_to_analyze:
+                 # Prefer a 2-word combo if possible
+                 words = text_to_analyze.split()
+                 if term in set(words):
+                    idx = words.index(term)
+                    if idx > 0 and len(words[idx-1]) > 3:
+                        primary_query = f"{words[idx-1]} {term}"
+                    else:
+                        primary_query = term
+                    logger.info("Pexels keywords extracted -> primary: '%s', fallback: '%s'", primary_query, fallback_category)
+                    return primary_query, fallback_category
+
+        # Fallback if nothing matched (rare for a space channel)
+        primary_query = random.choice(["galaxy", "deep space", "nebula"])
             
         logger.info("Pexels keywords extracted -> primary: '%s', fallback: '%s'", primary_query, fallback_category)
         return primary_query, fallback_category

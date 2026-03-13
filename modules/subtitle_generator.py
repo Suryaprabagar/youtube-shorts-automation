@@ -11,7 +11,7 @@ class SubtitleGenerator:
 
     def generate(self, script_text: str, duration: float) -> List[Tuple[float, float, str]]:
         """
-        Splits the text into 4-6 word chunks and estimates timestamps based
+        Splits the text into sentences and estimates timestamps based
         on standard reading speed (or evenly distributing by word count).
 
         Args:
@@ -23,35 +23,34 @@ class SubtitleGenerator:
         """
         logger.info("Generating subtitles from script heuristically (No STT)")
         
-        # Clean and split the script into words
-        words = script_text.split()
-        if not words:
+        # Split by typical sentence ending punctuation
+        import re
+        sentences = re.split(r'(?<=[.!?]) +', script_text.strip())
+        
+        if not sentences or (len(sentences) == 1 and not sentences[0]):
             return []
 
-        # Target 4 words per chunk
-        chunk_size = 4
-        chunks = []
-        for i in range(0, len(words), chunk_size):
-            chunk_text = " ".join(words[i:i + chunk_size])
-            chunks.append(chunk_text)
+        # Filter out empty strings
+        sentences = [s for s in sentences if s]
 
-        # Distribute time based on character count per chunk
-        total_chars = sum(len(c) for c in chunks)
+        # Distribute time based on character count per sentence
+        total_chars = sum(len(s) for s in sentences)
         if total_chars == 0:
             return []
 
         subtitles = []
         current_time = 0.0
 
-        for chunk in chunks:
-            # Proportion of time this chunk takes
-            char_ratio = len(chunk) / total_chars
-            chunk_duration = duration * char_ratio
+        for sentence in sentences:
+            # Proportion of time this sentence takes
+            char_ratio = len(sentence) / total_chars
+            sentence_duration = duration * char_ratio
             
             start_time = current_time
-            end_time = start_time + chunk_duration
+            # Prevent overlap and ensure it doesn't exceed total duration
+            end_time = min(start_time + sentence_duration, duration)
             
-            subtitles.append((start_time, end_time, chunk))
+            subtitles.append((start_time, end_time, sentence))
             current_time = end_time
 
         logger.info(f"Generated {len(subtitles)} subtitle chunks.")

@@ -96,18 +96,28 @@ class VideoEditor:
         voice_clip = voice_clip.subclip(0, target_duration)
 
         # Mix with Background Music if available
-        bg_music_path = "assets/bg_music.mp3"
-        if os.path.exists(bg_music_path):
-            try:
-                bg_music_clip = AudioFileClip(bg_music_path)
-                # Loop music to match target duration, and lower volume significantly
-                bg_music_clip = audio_loop(bg_music_clip, duration=target_duration)
-                bg_music_clip = volumex(bg_music_clip, 0.1) # 10% volume
-                
-                final_audio = CompositeAudioClip([voice_clip, bg_music_clip])
-                logger.info("Successfully mixed voiceover with background music.")
-            except Exception as e:
-                logger.error(f"Failed to mix background music: {e}")
+        bg_music_dir = "assets/music"
+        bg_music_clip = None
+        if os.path.exists(bg_music_dir) and os.path.isdir(bg_music_dir):
+            import random
+            music_files = [f for f in os.listdir(bg_music_dir) if f.endswith(('.mp3', '.wav', '.m4a'))]
+            if music_files:
+                music_file = random.choice(music_files)
+                bg_music_path = os.path.join(bg_music_dir, music_file)
+                logger.info(f"Using background music: {bg_music_path}")
+                try:
+                    bg_music_clip = AudioFileClip(bg_music_path)
+                    # Loop music to match target duration, and lower volume to 15%
+                    bg_music_clip = audio_loop(bg_music_clip, duration=target_duration)
+                    bg_music_clip = volumex(bg_music_clip, 0.15) # 15% volume
+                    
+                    final_audio = CompositeAudioClip([voice_clip, bg_music_clip])
+                    logger.info("Successfully mixed voiceover with background music.")
+                except Exception as e:
+                    logger.error(f"Failed to mix background music: {e}")
+                    final_audio = voice_clip
+            else:
+                logger.info("No music files found in assets/music/")
                 final_audio = voice_clip
         else:
             final_audio = voice_clip
@@ -256,14 +266,14 @@ class VideoEditor:
                 # Viral style: Large, center, bold, yellow/white text with stroke
                 tc = TextClip(
                     text.upper(),
-                    fontsize=100,
-                    color="yellow",
-                    font="Impact",  # Or 'DejaVu-Sans-Bold'
+                    fontsize=70,
+                    color="white",
+                    font="DejaVu-Sans-Bold",
                     stroke_color="black",
-                    stroke_width=5,
+                    stroke_width=2,
                     method="caption",
-                    size=(self.width * 0.9, None)  # Wrap to screen width
-                ).set_position(("center", "center")).set_start(start_time).set_duration(dur)
+                    size=(self.width * 0.8, None)
+                ).set_position(("center", 0.85), relative=True).set_start(start_time).set_duration(dur)
                 clips.append(tc)
             except Exception as e:
                 # Fallback style

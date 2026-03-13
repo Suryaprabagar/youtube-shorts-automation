@@ -16,28 +16,30 @@ import config as cfg
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "You are a professional YouTube Shorts scriptwriter. "
+    "You are a professional YouTube Shorts scriptwriter specializing in Space and Astronomy. "
     "You write engaging, fast-paced voiceover scripts that hook viewers "
-    "in the first 3 seconds and deliver one compelling insight. "
-    "Keep scripts punchy, conversational, and free of filler words."
+    "instantly and deliver compelling, mind-blowing facts about the universe. "
+    "Keep scripts simple, conversational, and free of filler words."
 )
 
-USER_PROMPT_TEMPLATE = """Write a YouTube Shorts voiceover script on this topic:
+USER_PROMPT_TEMPLATE = """Write a YouTube Shorts voiceover script about this space topic:
 
 Topic: {topic}
 
 Requirements:
-- Target length: STRICTLY MAXIMUM 40 WORDS. (extremely short)
-- You MUST follow this exact 3-part structure, with no extra filler:
-  1. HOOK (first 2-3 seconds, incredibly catchy/viral)
-  2. MAIN FACT (the core information)
-  3. CURIOSITY ENDING (make them want to watch again or think)
-- Tone: fast-paced, engaging, conversational.
+- Target length: AROUND 100-120 WORDS. (This ensures a 40-55 second narration)
+- Tone: fast-paced, engaging, simple language, and conversational.
+- You MUST follow this exact 4-part structure:
+  1. HOOK: A curiosity-driven opening sentence.
+  2. EXPLANATION: Simple context and explanation of the topic.
+  3. SURPRISING FACT: Include one mind-blowing or unexpected fact.
+  4. ENDING HOOK: End with a question or statement to make them want to watch again.
+- Do NOT include labels like 'HOOK:' or 'EXPLANATION:' in the output.
 - Do NOT include scene directions, timestamps, headers, [MUSIC], [CUT], or any production notes.
 - Output ONLY the raw voiceover text to be spoken, nothing else.
 
 Example structure:
-"This animal can survive without oxygen. Scientists discovered a jellyfish that doesn't need air to live. And the reason is absolutely terrifying."
+"What happens exactly at the edge of a black hole? It is called the event horizon, and it's the point of no return. But here is the crazy part. If you fell in, time would slow down so much that you could watch the entire future of the universe unfold before you cross the edge. Would you take the risk?"
 """
 
 

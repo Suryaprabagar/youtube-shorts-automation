@@ -16,11 +16,11 @@ import config as cfg
 logger = logging.getLogger(__name__)
 
 # YouTube character limits
-TITLE_MAX_CHARS = 100
+TITLE_MAX_CHARS = 70  # stricter limit for better click-through rate
 DESCRIPTION_MAX_CHARS = 5000
 TAGS_MAX_TOTAL_CHARS = 500
 
-METADATA_PROMPT_TEMPLATE = """Generate metadata for a YouTube Short.
+METADATA_PROMPT_TEMPLATE = """Generate metadata for a Space and Astronomy YouTube Short.
 
 Topic: {topic}
 Script: {script}
@@ -28,10 +28,10 @@ Script: {script}
 Respond ONLY with raw JSON in this exact structure:
 {{
   "titles": [
-    "5 options for a curiosity-driven title under 60 characters total, ending with #Shorts"
+    "5 options for a curiosity-driven title under 60 characters total, ending with 🤯 #Shorts"
   ],
-  "description": "2-3 sentences max. Include 3 relevant keywords.",
-  "tags": ["5", "to", "8", "single", "word", "tags", "shorts"]
+  "description": "2-3 sentences max summarizing the space fact. Include 3 relevant keywords.",
+  "tags": ["5", "to", "8", "single", "word", "tags"]
 }}
 """
 
@@ -114,20 +114,24 @@ class MetadataGenerator:
 
         # Ensure required keys exist
         # Pick the best title out of the 5.
-        # Simple selection: just take the first one, or randomly select from top 3.
         titles = data.get("titles", [])
         if isinstance(titles, list) and len(titles) > 0:
             import random
-            best_title = str(random.choice(titles[:3]))[:TITLE_MAX_CHARS]
+            best_title = str(random.choice(titles[:3]))
+            # If it's too long, truncate it nicely.
+            if len(best_title) > TITLE_MAX_CHARS:
+                 best_title = best_title[:TITLE_MAX_CHARS - 10].rsplit(' ', 1)[0] + ' #Shorts'
         else:
             best_title = str(data.get("title", topic))[:TITLE_MAX_CHARS]
 
-        description = str(data.get("description", f"Watch this Short about {topic}. #Shorts"))
+        description = str(data.get("description", f"Watch this amazing space fact about {topic}. #Shorts"))
         tags = data.get("tags", [])
 
-        # Ensure #shorts is in description
-        if "#shorts" not in description.lower():
-            description += "\n\n#Shorts #YouTubeShorts"
+        # Ensure space requirements are met in description
+        required_hashtags = ["#shorts", "#space", "#astronomy", "#universe"]
+        for hashtag in required_hashtags:
+            if hashtag.lower() not in description.lower():
+                description += f" {hashtag}"
 
         # Trim description
         description = description[:DESCRIPTION_MAX_CHARS]
@@ -137,9 +141,11 @@ class MetadataGenerator:
             tags = [topic.split()[0]]
         tags = [str(t).replace(" ", "").replace("#", "") for t in tags if t]
         
-        # Ensure 'shorts' is in tags
-        if "shorts" not in [t.lower() for t in tags]:
-            tags.insert(0, "shorts")
+        # Ensure mandatory tags are in the final tags array
+        mandatory_tags = ["shorts", "space", "astronomy", "universe"]
+        for tag in mandatory_tags:
+            if tag not in [t.lower() for t in tags]:
+                tags.insert(0, tag)
 
         # Trim tags to fit within total character limit
         total_chars = 0
