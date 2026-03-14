@@ -15,7 +15,7 @@ class SubtitleGenerator:
 
     def generate(self, script_text: str, duration: float) -> List[Tuple[float, float, str]]:
         """
-        Splits the text into short phrases (2-4 words) and estimates timestamps.
+        Splits the text into phrases based on punctuation and estimates timestamps.
 
         Args:
             script_text: The full text of the voiceover.
@@ -24,47 +24,57 @@ class SubtitleGenerator:
         Returns:
             A list of tuples: (start_time, end_time, text_chunk)
         """
-        logger.info(f"Generating subtitles using {self.wpm} WPM heuristic for {duration:.1f}s audio.")
+        logger.info(f"Generating subtitles using character-weighted timing for {duration:.1f}s audio.")
         
         # Clean text: remove excessive whitespace and newlines
         clean_text = re.sub(r'\s+', ' ', script_text.strip())
-        words = clean_text.split()
         
-        if not words:
+        if not clean_text:
             return []
 
-        # 1. Chunk words into phrases of 2-4 words
+        # 1. Split on sentence boundaries (. ? !)
+        # Using regex to keep the punctuation with the preceding phrase
+        sentences = re.split(r'(?<=[.!?])\s+', clean_text)
+        
         chunks = []
-        i = 0
-        while i < len(words):
-            # Randomly pick 2-4 words or until we hit the end
-            import random
-            chunk_size = random.randint(2, 4)
-            chunk_words = words[i:i + chunk_size]
-            chunks.append(" ".join(chunk_words))
-            i += chunk_size
+        for s in sentences:
+            if not s.strip():
+                continue
+            # Further split very long sentences if they lack punctuation
+            if len(s.split()) > 6:
+                words = s.split()
+                for i in range(0, len(words), 4):
+                    chunks.append(" ".join(words[i:i + 4]))
+            else:
+                chunks.append(s.strip())
 
-        # 2. Distribute time based on word count per chunk
-        total_words = len(words)
+        # 2. Distribute time based on character count per chunk
+        # Character count excluding spaces gives better results for timing
+        total_chars = sum(len(c.replace(" ", "")) for c in chunks)
+        if total_chars == 0:
+            return []
+
         current_time = 0.0
         subtitles = []
 
         for chunk in chunks:
-            chunk_word_count = len(chunk.split())
-            # Proportion of total words in this chunk
-            word_ratio = chunk_word_count / total_words
-            chunk_duration = duration * word_ratio
+            chunk_chars = len(chunk.replace(" ", ""))
+            # Proportion of total characters in this chunk
+            char_ratio = chunk_chars / total_chars
+            chunk_duration = duration * char_ratio
             
             start_time = current_time
             end_time = min(start_time + chunk_duration, duration)
             
-            subtitles.append((start_time, end_time, chunk))
-            current_time = end_time
+            # Avoid chunks with zero duration
+            if end_time > start_time:
+                subtitles.append((start_time, end_time, chunk))
+                current_time = end_time
 
         # Ensure last chunk reaches exact end if slight rounding error
         if subtitles:
             last_start, _, last_text = subtitles[-1]
             subtitles[-1] = (last_start, duration, last_text)
 
-        logger.info(f"Generated {len(subtitles)} short subtitle phrases.")
+        logger.info(f"Generated {len(subtitles)} synced subtitle phrases.")
         return subtitles

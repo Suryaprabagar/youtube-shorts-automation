@@ -39,7 +39,7 @@ class VideoEditor:
         self.width = cfg.SHORTS_WIDTH     # 1080
         self.height = cfg.SHORTS_HEIGHT   # 1920
         self.fps = cfg.SHORTS_FPS         # 30
-        self.max_duration = min(10.0, cfg.SHORTS_MAX_DURATION)  # STRICT 10 seconds max
+        self.max_duration = cfg.SHORTS_MAX_DURATION  # Use config value (e.g. 59s)
 
     def edit(
         self,
@@ -48,15 +48,17 @@ class VideoEditor:
         output_path: str = cfg.FINAL_VIDEO_PATH,
         script: str = "",  # Added script
         topic: str = "",
+        video_paths: Optional[List[str]] = None, # Added multi-segment support
     ) -> str:
         """
         Create the final Short MP4.
 
         Args:
-            video_path: Path to background video.
+            video_path: Path to background video (fallback).
             audio_path: Path to voiceover MP3.
             output_path: Destination for final MP4.
             topic: Topic text to overlay as title card.
+            video_paths: Optional list of segment video paths.
 
         Returns:
             Absolute path to final video.
@@ -64,7 +66,7 @@ class VideoEditor:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         try:
-            return self._edit_with_moviepy(video_path, audio_path, output_path, script, topic)
+            return self._edit_with_moviepy(video_path, audio_path, output_path, script, topic, video_paths)
         except Exception as e:
             logger.warning("MoviePy failed (%s). Falling back to FFmpeg.", e)
             return self._edit_with_ffmpeg(video_path, audio_path, output_path)
@@ -76,22 +78,22 @@ class VideoEditor:
         video_path: str,
         audio_path: str,
         output_path: str,
-        script: str,  # Added script
+        script: str,
         topic: str,
+        video_paths: Optional[List[str]] = None,
     ) -> str:
         from moviepy.editor import (
             VideoFileClip, AudioFileClip, CompositeVideoClip,
-            TextClip, ColorClip,
+            TextClip, ColorClip, concatenate_videoclips
         )
 
         logger.info("Editing video with MoviePy...")
 
-        # Load audio and clamp duration (stricly limit to 6-10 seconds)
+        # Load audio and clamp duration
         voice_clip = AudioFileClip(audio_path)
-        # We enforce a hard cut-off to meet short constraints
         target_duration = min(voice_clip.duration, self.max_duration)
         if target_duration < 6.0:
-            logger.warning("Audio duration %ss is less than 6s constraint.", target_duration)
+            logger.warning("Audio duration %.1fs is less than 6s constraint.", target_duration)
         
         voice_clip = voice_clip.subclip(0, target_duration)
 
@@ -107,24 +109,33 @@ class VideoEditor:
                 logger.info(f"Using background music: {bg_music_path}")
                 try:
                     bg_music_clip = AudioFileClip(bg_music_path)
-                    # Loop music to match target duration, and lower volume to 15%
                     bg_music_clip = audio_loop(bg_music_clip, duration=target_duration)
-                    bg_music_clip = volumex(bg_music_clip, 0.15) # 15% volume
-                    
+                    bg_music_clip = volumex(bg_music_clip, 0.15)
                     final_audio = CompositeAudioClip([voice_clip, bg_music_clip])
-                    logger.info("Successfully mixed voiceover with background music.")
                 except Exception as e:
                     logger.error(f"Failed to mix background music: {e}")
                     final_audio = voice_clip
             else:
-                logger.info("No music files found in assets/music/")
                 final_audio = voice_clip
         else:
             final_audio = voice_clip
 
-        # Load + resize + crop background video
-        bg_clip = VideoFileClip(video_path, audio=False)
-        bg_clip = self._resize_crop(bg_clip, target_duration)
+        # Load background video(s)
+        if video_paths and len(video_paths) > 0:
+            logger.info(f"Concatenating {len(video_paths)} video segments...")
+            segment_clips = []
+            segment_duration = target_duration / len(video_paths)
+            for path in video_paths:
+                clip = VideoFileClip(path, audio=False)
+                clip = self._resize_crop(clip, segment_duration)
+                segment_clips.append(clip)
+            bg_clip = concatenate_videoclips(segment_clips)
+        else:
+            bg_clip = VideoFileClip(video_path, audio=False)
+            bg_clip = self._resize_crop(bg_clip, target_duration)
+
+        # Ensure bg_clip duration matches target exactly
+        bg_clip = bg_clip.set_duration(target_duration)
 
         # Build layers
         layers = [bg_clip]

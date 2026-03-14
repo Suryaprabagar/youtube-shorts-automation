@@ -100,19 +100,21 @@ def run_pipeline(cfg: Config) -> None:
     logger.info("Voiceover saved: %s", voice_path)
 
     # ── Step 4: Download Background Video ─────────────────────────────────────
-    logger.info("\n🎬 STEP 4/7 — Downloading background video from Pexels...")
+    logger.info("\n🎬 STEP 4/7 — Downloading background video segments from Pexels...")
     video_dl = VideoDownloader(api_key=cfg.pexels_api_key)
-    video_path = video_dl.download(topic=topic, script=script)
-    logger.info("Background video saved: %s", video_path)
+    # Use multi-segment download for better variety (Bug 4 fix)
+    video_paths = video_dl.download_segments(topic=topic, script=script, n_segments=3)
+    logger.info(f"Downloaded {len(video_paths)} background segments.")
 
     # ── Step 5: Edit + Combine into Final Short ────────────────────────────────
     logger.info("\n🎞️  STEP 5/7 — Editing video (crop → overlay → merge audio)...")
     editor = VideoEditor()
     final_video_path = editor.edit(
-        video_path=video_path,
+        video_path=video_paths[0], # Fallback for FFmpeg or single clip
         audio_path=voice_path,
-        script=script,  # Pass the script for subtitles
+        script=script,
         topic=topic,
+        video_paths=video_paths,   # Multi-segment list
     )
     logger.info("Final video saved: %s", final_video_path)
 

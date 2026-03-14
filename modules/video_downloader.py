@@ -76,6 +76,53 @@ class VideoDownloader:
         self._stream_download(video_url, output_path)
         return output_path
 
+    def download_segments(self, topic: str, script: str, n_segments: int = 4) -> List[str]:
+        """
+        Splits the script into n segments and downloads a unique video clip for each.
+        Returns a list of local file paths.
+        """
+        import re
+        # Clean and split script into sentences
+        clean_script = re.sub(r'\s+', ' ', script.strip())
+        sentences = re.split(r'(?<=[.!?])\s+', clean_script)
+        sentences = [s for s in sentences if s.strip()]
+        
+        if not sentences:
+            # Fallback to single download if no sentences found
+            return [self.download(topic, script)]
+
+        # Chunk sentences into n segments
+        avg = len(sentences) / float(n_segments)
+        segment_texts = []
+        last = 0.0
+        while last < len(sentences):
+            segment_texts.append(" ".join(sentences[int(last):int(last + avg)]))
+            last += avg
+        
+        # Ensure we don't have more than n_segments
+        segment_texts = segment_texts[:n_segments]
+        
+        video_paths = []
+        logger.info(f"Downloading {len(segment_texts)} video segments...")
+        
+        for i, seg_text in enumerate(segment_texts):
+            seg_path = os.path.join(cfg.OUTPUT_DIR, f"segment_{i}.mp4")
+            try:
+                # Use first few words of segment as extra topic context
+                seg_topic = f"{topic} {' '.join(seg_text.split()[:3])}"
+                path = self.download(seg_topic, seg_text, output_path=seg_path)
+                video_paths.append(path)
+            except Exception as e:
+                logger.error(f"Failed to download segment {i}: {e}")
+                # If we have at least one segment, we can proceed, otherwise fallback
+                continue
+        
+        if not video_paths:
+            logger.warning("All segment downloads failed. Falling back to single video.")
+            return [self.download(topic, script)]
+            
+        return video_paths
+
     def _search_pexels(self, query: str) -> Optional[dict]:
         """Call Pexels API to search for videos."""
         params = {
