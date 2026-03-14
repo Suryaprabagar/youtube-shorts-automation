@@ -35,17 +35,17 @@ jobs:
       DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
 
     steps:
-      # ── 1. Checkout repository ──────────────────────────────────────────────
+      # ── 1. Checkout repository ─────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Set up Python 3.11 ───────────────────────────────────────────────
+      # ── 2. Set up Python 3.11 ──────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # ── 3. Cache pip packages ───────────────────────────────────────────────
+      # ── 3. Cache pip packages ──────────────────────────────────────────────
       - name: Cache pip dependencies
         uses: actions/cache@v4
         with:
@@ -54,26 +54,54 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # ── 4. Install system dependencies ─────────────────────────────────────
-      - name: Install system dependencies (FFmpeg & ImageMagick)
+      # ── 4. Install system dependencies ────────────────────────────────────
+      - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg imagemagick
-          # Fix ImageMagick policy to allow text generation for MoviePy
-          sudo sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@\*"/g' /etc/ImageMagick-6/policy.xml || true
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            imagemagick \
+            fonts-dejavu-core \
+            fonts-dejavu-extra
 
-      # ── 5. Install Python packages ──────────────────────────────────────────
+          # ── Fix ImageMagick policy so MoviePy can render text ──────────────
+          # Replaces the blanket "none" rights on @* with read|write
+          POLICY_FILE="/etc/ImageMagick-6/policy.xml"
+          if [ -f "$POLICY_FILE" ]; then
+            sudo sed -i \
+              's|<policy domain="coder" rights="none" pattern="@\*"/>|<policy domain="coder" rights="read|write" pattern="@*"/>|g' \
+              "$POLICY_FILE"
+            # Also allow TEXT and LABEL coders used by MoviePy TextClip
+            sudo sed -i \
+              's|<policy domain="coder" rights="none" pattern="TEXT"/>||g' \
+              "$POLICY_FILE"
+            sudo sed -i \
+              's|<policy domain="coder" rights="none" pattern="LABEL"/>||g' \
+              "$POLICY_FILE"
+            echo "ImageMagick policy patched."
+          else
+            echo "ImageMagick policy file not found — skipping patch."
+          fi
+
+          # ── Verify critical tools are available ───────────────────────────
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+          convert -version | head -1
+          fc-list | grep -i dejavu | head -3
+
+      # ── 5. Install Python dependencies ────────────────────────────────────
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install setuptools==69.5.1 wheel
           pip install -r requirements.txt
 
-      # ── 6. Run the automation pipeline ─────────────────────────────────────
+      # ── 6. Run the automation pipeline ────────────────────────────────────
       - name: Run YouTube Shorts automation pipeline
+        id: pipeline
         run: python main.py
 
-      # ── 7. Upload output artifacts (for debugging) ──────────────────────────
+      # ── 7. Upload output artifacts (for debugging) ────────────────────────
       - name: Upload output artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -82,3 +110,24 @@ jobs:
           path: output/
           retention-days: 3
           if-no-files-found: ignore
+
+      # ── 8. Print failure summary if pipeline crashed ──────────────────────
+      - name: Print failure summary
+        if: failure()
+        run: |
+          echo "## ❌ Pipeline Failed — Run #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Time (UTC):** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check the logs above for the exact error." >> $GITHUB_STEP_SUMMARY
+          echo "Output artifacts (if any) are attached to this run." >> $GITHUB_STEP_SUMMARY
+
+      # 9. Print success summary ──────────────────────────────────────────
+      - name: Print success summary
+        if: success()
+        run: |
+          echo "## ✅ Pipeline Succeeded — Run #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Time (UTC):** $(date -u)" >> $GITHUB_STEP_SUMMARY
