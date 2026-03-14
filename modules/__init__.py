@@ -11,6 +11,7 @@ from modules.metadata_generator import MetadataGenerator
 from modules.youtube_uploader import YouTubeUploader
 from modules.subtitle_generator import SubtitleGenerator
 from modules.youtube_analytics import YouTubeAnalytics
+from modules.keyword_extractor import KeywordExtractor
 
 __all__ = [
     "TopicGenerator",
@@ -22,4 +23,5 @@ __all__ = [
     "YouTubeUploader",
     "SubtitleGenerator",
     "YouTubeAnalytics",
+    "KeywordExtractor",
 ]

@@ -27,6 +27,7 @@ from modules.video_editor import VideoEditor
 from modules.metadata_generator import MetadataGenerator
 from modules.youtube_uploader import YouTubeUploader
 from modules.youtube_analytics import YouTubeAnalytics
+from modules.keyword_extractor import KeywordExtractor
 
 # ── Root logger ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -79,6 +80,12 @@ def run_pipeline(cfg: Config) -> None:
     topic_gen = TopicGenerator()
     topic = topic_gen.generate(category=selected_category)
     logger.info("Topic: %s", topic)
+
+    # ── Step 1.5: Extract Keywords ──────────────────────────────────────────────
+    logger.info("\n🔑 STEP 1.5/7 — Extracting keywords...")
+    keyword_extractor = KeywordExtractor()
+    keywords = keyword_extractor.extract(topic)
+    logger.info("Keywords: %s", keywords)
 
     # ── Step 2: Generate Script ────────────────────────────────────────────────
     logger.info("\n✍️  STEP 2/7 — Generating script...")

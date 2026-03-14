@@ -3,28 +3,26 @@ modules/video_downloader.py
 Downloads a vertical stock video from Pexels API matching the given topic/keyword.
 
 Pexels API: https://www.pexels.com/api/
-Free tier: 200 requests/hour, 20,000/month
 """
 
 import logging
 import os
-import re
+import random
 import requests
-import math
-from typing import Optional
+from typing import Optional, List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 import config as cfg
+from modules.keyword_extractor import KeywordExtractor
 
 logger = logging.getLogger(__name__)
 
 PEXELS_SEARCH_URL = "https://api.pexels.com/videos/search"
-PREFERRED_ORIENTATIONS = ["portrait"]   # vertical/portrait for Shorts
-MIN_DURATION = 15   # seconds
-MAX_DURATION = 70   # seconds
-PREFERRED_QUALITY = ["hd", "sd"]       # prefer HD, fall back to SD
-REQUEST_TIMEOUT = 30                    # seconds
-
+PREFERRED_ORIENTATIONS = ["portrait"]
+MIN_DURATION = 15
+MAX_DURATION = 70
+PREFERRED_QUALITY = ["hd", "sd"]
+REQUEST_TIMEOUT = 30
 
 class VideoDownloader:
     """Downloads a vertical stock video from Pexels for a given topic keyword."""
@@ -32,52 +30,9 @@ class VideoDownloader:
     def __init__(self, api_key: str):
         if not api_key:
             raise ValueError("PEXELS_API_KEY is required for video download.")
-        self.api_key = api_key # Store api_key directly for use in _search_pexels
+        self.api_key = api_key
         self._headers = {"Authorization": api_key}
-
-    def generate_keywords(self, topic: str, script: str = None) -> tuple[str, str]:
-        """
-        Extract the best search keyword and a fallback category from the topic.
-        Since this is a space channel, we force the fallback to 'space' or 'galaxy'.
-        Returns: (primary_keyword, fallback_category)
-        """
-        fallback_category = "space"
-        
-        # Space-specific terms to look for
-        space_terms = [
-            "space", "galaxy", "nebula", "astronaut", "planet",
-            "milky way", "universe", "stars", "cosmos", "black hole",
-            "solar system", "moon", "sun", "supernova", "telescope"
-        ]
-        
-        # 1. Search the raw topic and script for these terms directly first
-        text_to_analyze = topic.lower()
-        if script:
-            text_to_analyze += " " + script.lower()
-            
-        for term in ["black hole", "milky way", "solar system"]:  # Check multi-word first
-            if term in text_to_analyze:
-                logger.info("Pexels keywords extracted -> primary: '%s', fallback: '%s'", term, fallback_category)
-                return term, fallback_category
-                
-        for term in space_terms:
-            if term in text_to_analyze:
-                 # Prefer a 2-word combo if possible
-                 words = text_to_analyze.split()
-                 if term in set(words):
-                    idx = words.index(term)
-                    if idx > 0 and len(words[idx-1]) > 3:
-                        primary_query = f"{words[idx-1]} {term}"
-                    else:
-                        primary_query = term
-                    logger.info("Pexels keywords extracted -> primary: '%s', fallback: '%s'", primary_query, fallback_category)
-                    return primary_query, fallback_category
-
-        # Fallback if nothing matched (rare for a space channel)
-        primary_query = random.choice(["galaxy", "deep space", "nebula"])
-            
-        logger.info("Pexels keywords extracted -> primary: '%s', fallback: '%s'", primary_query, fallback_category)
-        return primary_query, fallback_category
+        self.extractor = KeywordExtractor()
 
     @retry(
         retry=retry_if_exception_type((requests.RequestException, RuntimeError)),
@@ -88,108 +43,109 @@ class VideoDownloader:
     def download(self, topic: str, script: str = None, output_path: str = cfg.VIDEO_RAW_PATH) -> str:
         """
         Search Pexels for a vertical video matching the topic and download it.
-
-        Args:
-            topic: Topic string used to derive a search keyword.
-            script: Optional script content for better keyword extraction.
-            output_path: Where to save the downloaded video.
-
-        Returns:
-            Absolute path to the downloaded video.
+        Uses KeywordExtractor to try multiple queries.
         """
-        keyword, fallback_category = self.generate_keywords(topic, script)
+        keywords = self.extractor.extract(topic, script)
+        logger.info(f"Using extracted keywords for search: {keywords}")
+
+        # Try multiple search queries based on keywords
+        search_queries = keywords.copy()
         
-        # The _search_pexels method now returns the full data, not just the URL.
-        # We need to adapt the call and subsequent logic.
-        pexels_data = self._search_pexels(keyword)
+        # Add combined queries for better results if we have multiple keywords
+        if len(keywords) >= 2:
+            search_queries.insert(0, f"{keywords[0]} {keywords[1]}")
+            
+        # Add generic fallback as last resort
+        search_queries.append("space universe galaxy")
+        
         video_url = None
-        if pexels_data:
-            video_url = self._select_best_video_url(pexels_data.get("videos", []))
+        for query in search_queries:
+            logger.info(f"Searching Pexels for: '{query}'")
+            pexels_data = self._search_pexels(query)
+            if pexels_data:
+                video_url = self._select_best_video_url(pexels_data.get("videos", []), query)
+                if video_url:
+                    logger.info(f"Found suitable video for query: '{query}'")
+                    break
+            logger.warning(f"No suitable video found for query: '{query}', trying next...")
 
         if not video_url:
-            # Fallback: try with the category extracted from the topic
-            logger.warning("No results for '%s', retrying with fallback '%s'", keyword, fallback_category)
-            pexels_data_fallback = self._search_pexels(fallback_category)
-            if pexels_data_fallback:
-                video_url = self._select_best_video_url(pexels_data_fallback.get("videos", []))
-
-        if not video_url:
-            raise RuntimeError(f"Could not find a suitable video on Pexels for '{keyword}' or '{fallback_category}'.")
+            raise RuntimeError(f"Could not find a suitable video on Pexels after trying all keywords.")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         self._stream_download(video_url, output_path)
         return output_path
 
-    @retry(
-        retry=retry_if_exception_type((Exception)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True
-    )
-    def _search_pexels(self, keyword: str) -> Optional[dict]:
-        """Call Pexels API to search for orientatation=portrait videos."""
-        url = "https://api.pexels.com/videos/search"
-        headers = {"Authorization": self.api_key}
-        # Request a few more results since we'll try to find an exact matching short one
+    def _search_pexels(self, query: str) -> Optional[dict]:
+        """Call Pexels API to search for videos."""
         params = {
-            "query": keyword, # Removed 'background' from query to allow broader exact matching
+            "query": query,
             "per_page": 10,
             "orientation": "portrait"
         }
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
-        resp.raise_for_status()
-        
-        data = resp.json()
-        if not data.get("videos"):
-            logger.warning("No Pexels videos found for keyword '%s'", keyword)
+        try:
+            resp = requests.get(PEXELS_SEARCH_URL, headers=self._headers, params=params, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("videos"):
+                return None
+            return data
+        except Exception as e:
+            logger.error(f"Pexels API error: {e}")
             return None
-        return data
 
-    def _select_best_video_url(self, videos: list) -> str | None:
+    def _select_best_video_url(self, videos: list, query: str) -> Optional[str]:
         """Selects the best video URL from a list of Pexels video objects."""
         if not videos:
             return None
 
-        # Filter by duration
+        # Preference terms for filtering
+        preference_terms = ["astronaut", "planet", "nebula", "galaxy", "space animation"]
+        
+        # Sort videos: prioritized ones first
+        def get_priority(v):
+            description = str(v.get("url", "")).lower()
+            # If the description or tags (if available) contain preference terms, higher priority
+            priority = 0
+            for term in preference_terms:
+                if term in description:
+                    priority += 1
+            return priority
+
+        # Filter by duration and orientation (though API should handle orientation)
         suitable = [
             v for v in videos
             if MIN_DURATION <= v.get("duration", 0) <= MAX_DURATION
         ]
+        
         if not suitable:
-            suitable = videos  # relax filter if nothing matches
+            suitable = videos # Relax duration filter if no match
 
-        # Pick the first suitable video and select the best quality file
-        video = suitable[0]
-        video_files = video.get("video_files", [])
+        # Sort by priority (most relevant first)
+        suitable.sort(key=get_priority, reverse=True)
 
-        # Sort by quality preference
-        for quality in PREFERRED_QUALITY:
-            for vf in video_files:
-                if vf.get("quality") == quality:
-                    logger.info(
-                        "Selected Pexels video ID=%s, quality=%s, duration=%ds",
-                        video.get("id"), quality, video.get("duration"),
-                    )
-                    return vf["link"]
+        # Pick the best quality for the selected video
+        for video in suitable:
+            video_files = video.get("video_files", [])
+            # Sort by quality preference
+            for quality in PREFERRED_QUALITY:
+                for vf in video_files:
+                    if vf.get("quality") == quality:
+                        return vf["link"]
+            
+            # If no HD/SD preference, take first available
+            if video_files:
+                return video_files[0]["link"]
 
-        # If no preferred quality, return the first available
-        if video_files:
-            return video_files[0]["link"]
         return None
 
     def _stream_download(self, url: str, output_path: str) -> None:
-        """Stream-download a video file to disk with progress logging."""
-        logger.info("Downloading video from Pexels...")
+        """Stream-download a video file to disk."""
+        logger.info("Downloading video data...")
         with requests.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
-            total = int(r.headers.get("content-length", 0))
-            downloaded = 0
             with open(output_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 256):
                     if chunk:
                         f.write(chunk)
-                        downloaded += len(chunk)
-            logger.info(
-                "Video downloaded to '%s' (%.1f MB).",
-                output_path, downloaded / (1024 * 1024),
-            )
+        logger.info(f"Video saved to {output_path}")
