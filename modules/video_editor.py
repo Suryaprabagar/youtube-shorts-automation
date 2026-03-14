@@ -263,28 +263,28 @@ class VideoEditor:
                 continue
                 
             try:
-                # Viral style: Large, center, bold, yellow/white text with stroke
+                # Shorts style: Short phrases, bottom-center, white text with black outline
                 tc = TextClip(
-                    text.upper(),
-                    fontsize=70,
+                    text.strip(),
+                    fontsize=60,
                     color="white",
                     font="DejaVu-Sans-Bold",
                     stroke_color="black",
                     stroke_width=2,
                     method="caption",
-                    size=(self.width * 0.8, None)
-                ).set_position(("center", 0.85), relative=True).set_start(start_time).set_duration(dur)
+                    size=(self.width * 0.9, None)
+                ).set_position(("center", 0.75), relative=True).set_start(start_time).set_duration(dur)
                 clips.append(tc)
             except Exception as e:
-                # Fallback style
+                logger.error(f"Failed to generate subtitle clip for '{text}': {e}")
+                # Fallback style without background
                 tc = TextClip(
-                    text.upper(),
-                    fontsize=80,
-                    color="yellow",
-                    bg_color="black",
+                    text.strip(),
+                    fontsize=60,
+                    color="white",
                     method="caption",
                     size=(self.width * 0.9, None)
-                ).set_position(("center", "center")).set_start(start_time).set_duration(dur)
+                ).set_position(("center", 0.75), relative=True).set_start(start_time).set_duration(dur)
                 clips.append(tc)
 
         logger.info(f"Generated {len(clips)} subtitle overlays.")
