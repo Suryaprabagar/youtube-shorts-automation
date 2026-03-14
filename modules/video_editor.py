@@ -17,7 +17,7 @@ import logging
 import os
 import textwrap
 import subprocess
-from typing import Optional
+from typing import Optional, List
 import PIL.Image
 
 # Monkeypatch for MoviePy 1.0.3 + Pillow 10+ compatibility
