@@ -1,25 +1,26 @@
 """
 modules/video_downloader.py
-Downloads a vertical stock space video from Pexels API matching the given topic/keyword.
+Downloads a stock space video from Pexels API matching the given topic/keyword.
+
+KEY FIXES IN THIS VERSION:
+  1. No `orientation=portrait` restriction — accepts landscape AND portrait so the
+     full Pexels space-video pool is available (most cinematic space footage is
+     landscape, capping to portrait was starving the search).
+  2. Multi-field space detection — checks `alt`, Pexels page URL slug (always
+     present and descriptive), and `user.name` for space keywords. Alt alone is
+     unreliable because it is frequently empty on Pexels.
+  3. Negative keyword blocklist — explicitly rejects videos whose combined
+     metadata contains people/food/animal terms.
+  4. Portrait clips still preferred via +3 score bonus.
+  5. Landscape flag returned so the editor (video_editor.py) can apply
+     blur-pad conversion to make any landscape clip vertical.
+  6. Randomised top-N selection prevents same clip every run.
+  7. Used-ID persistence (data/used_video_ids.json) prevents same clip across runs.
 
 NEW WORKFLOW (sync fix):
   - download_space_video(topic) → returns (path, duration_seconds, description)
   - The caller (main.py) passes duration to ScriptGenerator so the script
-    is written to MATCH the video length exactly — eliminating A/V sync issues.
-  - The description is also passed to the script generator so the script
-    is visually relevant to what appears in the video.
-
-VIDEO QUALITY SCORING:
-  Pexels results are ranked by a quality score instead of being random.
-  Scoring prefers: portrait orientation > HD quality > duration fit for Shorts.
-  Space content filter: videos with irrelevant alt-text (no space keywords)
-  are discarded before scoring.
-
-ANTI-REPEAT:
-  Used Pexels video IDs are persisted to data/used_video_ids.json.
-  Previously seen IDs are skipped so every run gets a fresh clip.
-
-Pexels API: https://www.pexels.com/api/
+    is written to MATCH the video length exactly.
 """
 
 import json
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 PEXELS_SEARCH_URL = "https://api.pexels.com/videos/search"
 MIN_DURATION = 15
 MAX_DURATION = 70
-PREFERRED_QUALITY = ["hd", "sd"]
+PREFERRED_QUALITY = ["hd", "sd", "hd+", "uhd"]
 REQUEST_TIMEOUT = 30
 
 # How many top-scored candidates to randomly pick from (prevents same clip each run)
@@ -47,33 +48,50 @@ TOP_N_RANDOM = 5
 
 # Path to persist used video IDs between runs
 USED_IDS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "used_video_ids.json")
-MAX_USED_IDS = 100  # Keep only the most recent N IDs to avoid unbounded growth
+MAX_USED_IDS = 100  # Rolling window
 
-# Keywords that must appear in a video's alt/description text to be considered space-related
-SPACE_CONTENT_KEYWORDS = {
-    "space", "galaxy", "nebula", "star", "stars", "planet", "cosmos",
-    "universe", "astronaut", "milky way", "black hole", "supernova",
+# ── Space content detection ────────────────────────────────────────────────────
+
+# Keywords whose presence in alt/url/username → video IS space-related
+SPACE_POSITIVE_KEYWORDS = {
+    "space", "galaxy", "galaxies", "nebula", "nebulae", "star", "stars",
+    "planet", "planets", "cosmos", "universe", "astronaut", "milky",
+    "milky-way", "milkyway", "black-hole", "blackhole", "supernova",
     "telescope", "solar", "moon", "sun", "mars", "jupiter", "saturn",
-    "earth orbit", "astronomer", "astronomy", "rocket", "nasa", "spacex",
-    "comet", "asteroid", "meteor", "night sky", "timelapse sky",
-    "cosmic", "orbit", "spacecraft", "satellite", "hubble", "stellar",
+    "earth-orbit", "astronomer", "astronomy", "rocket", "nasa", "spacex",
+    "comet", "asteroid", "meteor", "night-sky", "nightsky", "timelapse",
+    "time-lapse", "cosmic", "orbit", "spacecraft", "satellite", "hubble",
+    "stellar", "astrophoto", "astrophotography", "aurora", "constellation",
+    "exoplanet", "quasar", "pulsar", "interstellar", "deep-space",
+    "space-exploration", "launch", "observatory",
+}
+
+# Keywords whose presence → video is NOT space-related (reject regardless)
+NEGATIVE_KEYWORDS = {
+    "child", "children", "kid", "kids", "baby", "babies", "toddler",
+    "woman", "man", "people", "person", "girl", "boy", "family",
+    "beach", "ocean", "sea", "forest", "mountain", "city", "urban",
+    "food", "cook", "cooking", "kitchen", "restaurant", "coffee",
+    "dog", "cat", "animal", "bird", "horse", "fish",
+    "wedding", "yoga", "gym", "fitness", "dance", "sport", "football",
+    "fashion", "makeup", "hair",
 }
 
 # Space-specific fallback queries tried in order if topic keywords yield nothing
 SPACE_FALLBACK_QUERIES = [
-    "space galaxy stars",
-    "nebula cosmos",
-    "planet universe",
-    "astronaut space",
+    "galaxy nebula space",
+    "stars cosmos universe",
+    "planet solar system",
+    "astronaut space exploration",
     "milky way night sky",
-    "black hole space",
-    "solar system planets",
-    "stars timelapse",
+    "black hole astronomy",
+    "space timelapse stars",
+    "nebula astrophotography",
 ]
 
 
 class VideoDownloader:
-    """Downloads vertical stock space videos from Pexels."""
+    """Downloads stock space videos from Pexels (landscape or portrait)."""
 
     def __init__(self, api_key: str):
         if not api_key:
@@ -83,7 +101,7 @@ class VideoDownloader:
         self.extractor = KeywordExtractor()
         self._used_ids = self._load_used_ids()
 
-    # ── PRIMARY METHOD (new workflow) ─────────────────────────────────────────
+    # ── PRIMARY METHOD ────────────────────────────────────────────────────────
 
     def download_space_video(
         self,
@@ -96,13 +114,8 @@ class VideoDownloader:
         Returns:
             (local_file_path, actual_duration_in_seconds, video_description)
 
-        The returned duration is the REAL video duration (via ffprobe), clamped
-        to SHORTS_MAX_DURATION. Pass this to ScriptGenerator so the script fits
-        the video exactly — this is the core fix for the audio/video sync bug.
-
-        The description string contains the Pexels video's user and alt text
-        which is passed to the LLM so the voiceover script is relevant to the
-        actual footage selected.
+        Accepts both landscape and portrait videos. The editor handles converting
+        landscape clips to 1080×1920 via FFmpeg blur-pad before compositing.
         """
         keywords = self.extractor.extract(topic)
         logger.info("Keywords for space video search: %s", keywords)
@@ -111,15 +124,17 @@ class VideoDownloader:
         search_queries = []
         if len(keywords) >= 2:
             search_queries.append(f"{keywords[0]} {keywords[1]} space")
-        search_queries.extend([f"{kw} space" for kw in keywords])
+        for kw in keywords:
+            search_queries.append(f"{kw} space")
+            search_queries.append(f"{kw} astronomy")
         search_queries.extend(SPACE_FALLBACK_QUERIES)
 
         # Deduplicate while preserving order
-        seen = set()
-        unique_queries = []
+        seen_q: set = set()
+        unique_queries: List[str] = []
         for q in search_queries:
-            if q not in seen:
-                seen.add(q)
+            if q not in seen_q:
+                seen_q.add(q)
                 unique_queries.append(q)
 
         video_url = None
@@ -127,7 +142,7 @@ class VideoDownloader:
         video_description = ""
         chosen_video_id = None
 
-        # --- Pass 1: space-filtered search ---
+        # ── Pass 1: space-filtered search ────────────────────────────────────
         for query in unique_queries:
             logger.info("Searching Pexels (space-filtered): '%s'", query)
             data = self._search_pexels(query)
@@ -136,32 +151,26 @@ class VideoDownloader:
                 if result:
                     video_url, pexels_duration, video_description, chosen_video_id = result
                     logger.info(
-                        "Selected video (filtered) id=%s, dur=%.1fs, desc='%s'",
-                        chosen_video_id,
-                        pexels_duration,
-                        video_description[:80],
+                        "Selected video (filtered) id=%s dur=%.1fs desc='%s'",
+                        chosen_video_id, pexels_duration, video_description[:80],
                     )
                     break
             logger.warning("No space-filtered result for '%s', trying next...", query)
 
-        # --- Pass 2: relaxed (accept any portrait video) if nothing found above ---
+        # ── Pass 2: relaxed (any video) if filter found nothing ───────────────
         if not video_url:
             logger.warning("Space filter yielded nothing — relaxing content filter.")
             for query in unique_queries:
-                logger.info("Searching Pexels (relaxed): '%s'", query)
                 data = self._search_pexels(query)
                 if data:
                     result = self._pick_best_video(data.get("videos", []), require_space=False)
                     if result:
                         video_url, pexels_duration, video_description, chosen_video_id = result
                         logger.info(
-                            "Selected video (relaxed) id=%s, dur=%.1fs, desc='%s'",
-                            chosen_video_id,
-                            pexels_duration,
-                            video_description[:80],
+                            "Selected video (relaxed) id=%s dur=%.1fs desc='%s'",
+                            chosen_video_id, pexels_duration, video_description[:80],
                         )
                         break
-                logger.warning("No relaxed result for '%s', trying next...", query)
 
         if not video_url:
             raise RuntimeError("No suitable space video found on Pexels after all queries.")
@@ -169,24 +178,19 @@ class VideoDownloader:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         self._stream_download(video_url, output_path)
 
-        # Mark this ID as used so it won't be reused in future runs
         if chosen_video_id:
             self._mark_used(chosen_video_id)
 
-        # Use ffprobe for the real duration (Pexels metadata can be slightly off)
         real_duration = self._probe_duration(output_path) or pexels_duration
         real_duration = min(real_duration, cfg.SHORTS_MAX_DURATION)
 
         logger.info("Video saved: %s (%.2fs)", output_path, real_duration)
         return output_path, real_duration, video_description
 
-    # ── SEGMENT DOWNLOAD (used by video editor for variety) ───────────────────
+    # ── SEGMENT DOWNLOAD ──────────────────────────────────────────────────────
 
     def download_segments(self, topic: str, script: str, n_segments: int = 3) -> List[str]:
-        """
-        Download n unique video clips to use as timeline segments.
-        Called AFTER the script is generated in the new workflow.
-        """
+        """Download n unique video clips to use as timeline segments."""
         sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", script.strip()))
         sentences = [s for s in sentences if s.strip()]
 
@@ -218,20 +222,24 @@ class VideoDownloader:
 
         return video_paths
 
-    # ── Legacy single download (backwards compat) ────────────────────────────
+    # ── Legacy compat ─────────────────────────────────────────────────────────
 
     def download(self, topic: str, script: str = None, output_path: str = cfg.VIDEO_RAW_PATH) -> str:
-        """Legacy method — returns path only (no duration or description)."""
         path, _, _ = self.download_space_video(topic, output_path)
         return path
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _search_pexels(self, query: str) -> Optional[dict]:
-        # Always ensure "space" is in the query to bias Pexels content
-        if "space" not in query.lower():
+        """Search Pexels — no orientation filter so landscape clips are included."""
+        # Ensure 'space' appears somewhere in the query for Pexels relevance
+        if "space" not in query.lower() and "astronomy" not in query.lower():
             query = f"{query} space"
-        params = {"query": query, "per_page": 30, "orientation": "portrait"}
+        params = {
+            "query": query,
+            "per_page": 30,
+            # No orientation param — accept both landscape and portrait
+        }
         try:
             resp = requests.get(
                 PEXELS_SEARCH_URL,
@@ -243,15 +251,33 @@ class VideoDownloader:
             data = resp.json()
             return data if data.get("videos") else None
         except Exception as e:
-            logger.error("Pexels API error: %s", e)
+            logger.error("Pexels API error for query '%s': %s", query, e)
             return None
 
-    def _is_space_related(self, video: dict) -> bool:
-        """Return True if the video's alt/tags contain at least one space keyword."""
+    def _extract_text_fields(self, video: dict) -> str:
+        """
+        Combine all available text from a Pexels video object into one string.
+        Checks alt, page URL slug, and user name — all normalised to lowercase.
+        The URL slug is the MOST RELIABLE field (e.g. /video/galaxy-nebula-12345/).
+        """
         alt = (video.get("alt") or "").lower()
+        url = (video.get("url") or "").lower()
+        # Extract the slug part of the URL (between /video/ and the trailing id)
+        url_slug = re.sub(r"https?://[^/]+/video/", "", url)
+        url_slug = re.sub(r"-\d+/?$", "", url_slug)   # strip trailing numeric id
         user_name = (video.get("user", {}).get("name") or "").lower()
-        combined = f"{alt} {user_name}"
-        for kw in SPACE_CONTENT_KEYWORDS:
+        return f"{alt} {url_slug} {user_name}"
+
+    def _is_space_related(self, combined: str) -> bool:
+        """Return True if at least one space keyword is present."""
+        for kw in SPACE_POSITIVE_KEYWORDS:
+            if kw in combined:
+                return True
+        return False
+
+    def _has_negative_keyword(self, combined: str) -> bool:
+        """Return True if any negative (non-space) keyword is present."""
+        for kw in NEGATIVE_KEYWORDS:
             if kw in combined:
                 return True
         return False
@@ -263,20 +289,11 @@ class VideoDownloader:
         Score and select the best video.
         Returns (url, duration, description, video_id) or None.
 
-        Scoring criteria (higher is better):
-          +3  portrait orientation (height > width)
-          +2  HD quality file available
-          +1  duration between 20-59s (ideal for Shorts)
-          -1  very short (<15s) or very long (>70s)
-
-        Selection:
-          Randomly pick from the top-N scored candidates to avoid the same
-          clip being chosen every run.
-
-        Filters applied before scoring:
-          - Skip videos whose ID is already in `used_ids`
-          - Skip videos with no valid download URL
-          - If require_space=True, skip videos with non-space alt text
+        Scoring:
+          +3  portrait orientation (height > width) — preferred for Shorts
+          +2  HD quality
+          +1  duration 20-59s (ideal for Shorts)
+          -1  duration < 15s or > 70s
         """
         if not videos:
             return None
@@ -290,17 +307,29 @@ class VideoDownloader:
                 logger.debug("Skipping already-used video id=%s", video_id)
                 continue
 
-            # Space content filter
-            if require_space and not self._is_space_related(video):
+            # Build combined text for content detection
+            combined = self._extract_text_fields(video)
+
+            # Always reject if negative keywords present
+            if self._has_negative_keyword(combined):
                 logger.debug(
-                    "Skipping non-space video id=%s alt='%s'",
-                    video_id,
-                    str(video.get("alt", ""))[:60],
+                    "Rejecting video id=%s (negative keyword) combined='%s'",
+                    video_id, combined[:80],
+                )
+                continue
+
+            # Space filter
+            if require_space and not self._is_space_related(combined):
+                logger.debug(
+                    "Rejecting non-space video id=%s combined='%s'",
+                    video_id, combined[:80],
                 )
                 continue
 
             score = 0
             duration = float(video.get("duration", 0))
+            w = video.get("width", 0)
+            h = video.get("height", 0)
 
             # Duration scoring
             if 20 <= duration <= 59:
@@ -308,68 +337,56 @@ class VideoDownloader:
             elif duration < MIN_DURATION or duration > MAX_DURATION:
                 score -= 1
 
-            # Find best file
-            best_url = None
-            best_quality = None
-            width = video.get("width", 0)
-            height = video.get("height", 0)
-
-            # Portrait orientation preference
-            if height > width:
+            # Orientation — portrait preferred (+3), landscape still accepted
+            if h > w:
                 score += 3
 
+            # Find best quality file
+            best_url = None
+            best_quality = None
             for quality in PREFERRED_QUALITY:
                 for vf in video.get("video_files", []):
-                    if vf.get("quality") == quality:
-                        if best_url is None:
-                            best_url = vf["link"]
-                            best_quality = quality
+                    if vf.get("quality") == quality and best_url is None:
+                        best_url = vf["link"]
+                        best_quality = quality
 
-            if best_quality == "hd":
+            if best_quality and best_quality.startswith("hd"):
                 score += 2
             elif best_quality == "sd":
                 score += 1
 
-            # Fallback: use first available file
+            # Fallback: first available file
             if best_url is None and video.get("video_files"):
                 best_url = video["video_files"][0]["link"]
 
             if best_url:
+                alt = (video.get("alt") or "").strip()
                 user = video.get("user", {}).get("name", "")
-                alt = video.get("alt", "") or ""
-                description = f"{alt} (by {user})".strip(" ()")
+                description = f"{alt} (by {user})".strip(" ()") if alt else f"Space video by {user}"
                 scored.append((score, duration, best_url, description, video_id))
 
         if not scored:
             return None
 
-        # Sort by score descending, then randomly choose from the top-N candidates
+        # Sort desc by score, then randomly pick from top N to vary output
         scored.sort(key=lambda x: x[0], reverse=True)
         top_candidates = scored[: min(TOP_N_RANDOM, len(scored))]
         chosen = random.choice(top_candidates)
         best_score, best_duration, best_url, best_desc, best_id = chosen
         logger.info(
-            "Video selected: id=%s score=%d duration=%.1fs desc='%s'",
-            best_id,
-            best_score,
-            best_duration,
-            best_desc[:60],
+            "Video selected: id=%s score=%d dur=%.1fs desc='%s'",
+            best_id, best_score, best_duration, best_desc[:60],
         )
         return best_url, best_duration, best_desc, best_id
 
     def _probe_duration(self, path: str) -> Optional[float]:
-        """Get exact video duration via ffprobe."""
         try:
             result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    path,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
+                ["ffprobe", "-v", "error",
+                 "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1",
+                 path],
+                capture_output=True, text=True, timeout=15,
             )
             return float(result.stdout.strip())
         except Exception as e:
@@ -377,8 +394,8 @@ class VideoDownloader:
             return None
 
     def _stream_download(self, url: str, output_path: str) -> None:
-        logger.info("Downloading video data...")
-        with requests.get(url, stream=True, timeout=60) as r:
+        logger.info("Downloading video from Pexels...")
+        with requests.get(url, stream=True, timeout=90) as r:
             r.raise_for_status()
             with open(output_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 256):
@@ -389,7 +406,6 @@ class VideoDownloader:
     # ── Used-ID persistence ───────────────────────────────────────────────────
 
     def _load_used_ids(self) -> set:
-        """Load previously used video IDs from disk."""
         try:
             if os.path.exists(USED_IDS_PATH):
                 with open(USED_IDS_PATH, "r", encoding="utf-8") as f:
@@ -402,12 +418,10 @@ class VideoDownloader:
         return set()
 
     def _mark_used(self, video_id) -> None:
-        """Persist a newly used video ID to disk."""
         str_id = str(video_id)
         self._used_ids.add(str_id)
         try:
             os.makedirs(os.path.dirname(USED_IDS_PATH), exist_ok=True)
-            # Keep only the most recent MAX_USED_IDS entries
             current_list = list(self._used_ids)
             if len(current_list) > MAX_USED_IDS:
                 current_list = current_list[-MAX_USED_IDS:]

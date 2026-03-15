@@ -3,16 +3,18 @@ modules/video_editor.py
 Assembles the final YouTube Short by combining background video + voiceover.
 
 Pipeline:
-  1. Load background video → resize/crop to 1080×1920 (9:16 portrait)
+  1. Pre-process segments: landscape clips → 1080×1920 via FFmpeg blur-pad
+     (blurred background + sharp centered overlay — no content cropped out)
   2. Concatenate multiple segments for visual variety
   3. Load audio track from voiceover MP3
   4. Loop or trim the video to match audio duration (capped at 59s)
-  5. Export a clean MP4 (no text via MoviePy - no ImageMagick needed)
+  5. Export a clean MP4 (no text via MoviePy — no ImageMagick needed)
   6. Burn subtitles via FFmpeg drawtext post-pass (pure FFmpeg, no ImageMagick)
 
 Primary engine: MoviePy (video/audio compositing, no text)
 Subtitle burn:  FFmpeg drawtext (reliable, no ImageMagick dependency)
 Fallback:       FFmpeg subprocess for full encode + subtitle burn
+Landscape fix:  FFmpeg blur-pad converts horizontal clips to 9:16 before MoviePy
 """
 
 import logging
@@ -148,18 +150,21 @@ class VideoEditor:
         # Optional background music mix
         final_audio = self._mix_audio(voice_clip, target_duration)
 
-        # Load and concatenate background video segments
+        # Pre-process segments: convert any landscape clips to vertical (blur-pad)
+        # then load and concatenate
         if video_paths and len(video_paths) > 0:
-            logger.info("Concatenating %d video segments...", len(video_paths))
+            logger.info("Pre-processing and concatenating %d video segments...", len(video_paths))
             segment_clips = []
             segment_duration = target_duration / len(video_paths)
             for path in video_paths:
-                clip = VideoFileClip(path, audio=False)
+                vertical_path = self._to_vertical_ffmpeg(path)
+                clip = VideoFileClip(vertical_path, audio=False)
                 clip = self._resize_crop(clip, segment_duration)
                 segment_clips.append(clip)
             bg_clip = concatenate_videoclips(segment_clips)
         else:
-            bg_clip = VideoFileClip(video_path, audio=False)
+            vertical_path = self._to_vertical_ffmpeg(video_path)
+            bg_clip = VideoFileClip(vertical_path, audio=False)
             bg_clip = self._resize_crop(bg_clip, target_duration)
 
         bg_clip = bg_clip.set_duration(target_duration)
@@ -270,17 +275,19 @@ class VideoEditor:
         """
         logger.info("Falling back to full FFmpeg encode...")
 
-        # If multiple segments, concatenate first
+        # Pre-process segments to vertical if landscape, then concatenate
         if video_paths and len(video_paths) > 1:
+            vertical_paths = [self._to_vertical_ffmpeg(p) for p in video_paths]
             concat_path = output_path.replace(".mp4", "_concat.mp4")
-            self._ffmpeg_concat(video_paths, concat_path)
+            self._ffmpeg_concat(vertical_paths, concat_path)
             src_video = concat_path
         else:
-            src_video = video_path
+            src_video = self._to_vertical_ffmpeg(video_path)
 
         # Probe audio duration
         audio_dur = min(self._probe_duration(audio_path) or 45.0, self.max_duration)
 
+        # vf: safety-net crop in case clip isn't exactly 1080x1920 yet
         vf = (
             f"scale=w={self.width}:h={self.height}:force_original_aspect_ratio=increase,"
             f"crop={self.width}:{self.height}"
@@ -343,10 +350,74 @@ class VideoEditor:
 
     # ── Shared helpers ─────────────────────────────────────────────────────────
 
-    def _resize_crop(self, clip, target_duration):
-        """Resize and center-crop clip to 1080×1920. Loop if shorter than target."""
-        from moviepy.editor import vfx
+    def _to_vertical_ffmpeg(self, src_path: str) -> str:
+        """
+        If `src_path` is a landscape video, convert it to 1080×1920 using an
+        FFmpeg blur-pad filter and return the path to the converted file.
+        Portrait clips (height >= width) are returned as-is.
 
+        Blur-pad technique:
+          - Scale + blur the source frame to fill the full 1080×1920 canvas
+          - Overlay the original sharp frame centred on top
+          Result: no content is lost; black bars are replaced by a beautiful
+          blurred version of the same footage.
+        """
+        try:
+            # Probe dimensions
+            result = subprocess.run(
+                ["ffprobe", "-v", "error",
+                 "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height",
+                 "-of", "csv=p=0", src_path],
+                capture_output=True, text=True, timeout=15,
+            )
+            parts = result.stdout.strip().split(",")
+            if len(parts) != 2:
+                return src_path
+            w, h = int(parts[0]), int(parts[1])
+        except Exception as e:
+            logger.warning("Could not probe dimensions of %s: %s", src_path, e)
+            return src_path
+
+        # Portrait or square — no conversion needed
+        if h >= w:
+            logger.debug("Clip %s is portrait (%dx%d) — no conversion needed.", src_path, w, h)
+            return src_path
+
+        # Landscape — apply blur-pad to fill 1080×1920
+        logger.info("Converting landscape clip (%dx%d) to vertical via blur-pad: %s", w, h, src_path)
+        out_path = src_path.replace(".mp4", "_vertical.mp4")
+
+        # FFmpeg complex filter:
+        #   split → (a) blur + stretch to fill canvas, (b) scale to fit width
+        #   overlay (b) centred on (a)
+        vf = (
+            "[0:v]split=2[blurred][orig];"
+            f"[blurred]scale={self.width}:{self.height}:force_original_aspect_ratio=increase,"
+            f"crop={self.width}:{self.height},boxblur=25:5[bg];"
+            f"[orig]scale={self.width}:-2[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-i", src_path,
+            "-filter_complex", vf,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-b:v", cfg.SHORTS_VIDEO_BITRATE,
+            "-an",  # no audio in background segments
+            out_path,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            logger.error("Blur-pad conversion failed for %s: %s", src_path, proc.stderr[-1000:])
+            return src_path  # fallback: use original
+        logger.info("Blur-pad conversion done → %s", out_path)
+        return out_path
+
+    def _resize_crop(self, clip, target_duration):
+        """Resize and center-crop clip to 1080×1920. Loop if shorter than target.
+        NOTE: landscape clips should already be converted by _to_vertical_ffmpeg
+        before this is called, so this is mostly a safety net."""
         if clip.duration < target_duration:
             n_loops = int(target_duration / clip.duration) + 2
             clip = clip.loop(n_loops)
