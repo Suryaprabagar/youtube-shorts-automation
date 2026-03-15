@@ -69,7 +69,7 @@ jobs:
           POLICY_FILE="/etc/ImageMagick-6/policy.xml"
           if [ -f "$POLICY_FILE" ]; then
             sudo sed -i \
-              's|<policy domain="coder" rights="none" pattern="@\*"/>|<policy domain="coder" rights="read|write" pattern="@*"/>|g' \
+              's#<policy domain="coder" rights="none" pattern="@\*"/>#<policy domain="coder" rights="read|write" pattern="@*"/>#g' \
               "$POLICY_FILE"
             # Also allow TEXT and LABEL coders used by MoviePy TextClip
             sudo sed -i \
