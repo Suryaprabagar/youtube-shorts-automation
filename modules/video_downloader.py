@@ -1,6 +1,6 @@
 """
 modules/video_downloader.py
-Downloads a vertical stock video from Pexels API matching the given topic/keyword.
+Downloads a vertical stock space video from Pexels API matching the given topic/keyword.
 
 NEW WORKFLOW (sync fix):
   - download_space_video(topic) → returns (path, duration_seconds, description)
@@ -10,14 +10,23 @@ NEW WORKFLOW (sync fix):
     is visually relevant to what appears in the video.
 
 VIDEO QUALITY SCORING:
-  Pexels results are now ranked by a quality score instead of being random.
+  Pexels results are ranked by a quality score instead of being random.
   Scoring prefers: portrait orientation > HD quality > duration fit for Shorts.
+  Space content filter: videos with irrelevant alt-text (no space keywords)
+  are discarded before scoring.
+
+ANTI-REPEAT:
+  Used Pexels video IDs are persisted to data/used_video_ids.json.
+  Previously seen IDs are skipped so every run gets a fresh clip.
 
 Pexels API: https://www.pexels.com/api/
 """
 
+import json
 import logging
 import os
+import random
+import re
 import subprocess
 import requests
 from typing import Optional, List, Tuple
@@ -32,6 +41,23 @@ MIN_DURATION = 15
 MAX_DURATION = 70
 PREFERRED_QUALITY = ["hd", "sd"]
 REQUEST_TIMEOUT = 30
+
+# How many top-scored candidates to randomly pick from (prevents same clip each run)
+TOP_N_RANDOM = 5
+
+# Path to persist used video IDs between runs
+USED_IDS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "used_video_ids.json")
+MAX_USED_IDS = 100  # Keep only the most recent N IDs to avoid unbounded growth
+
+# Keywords that must appear in a video's alt/description text to be considered space-related
+SPACE_CONTENT_KEYWORDS = {
+    "space", "galaxy", "nebula", "star", "stars", "planet", "cosmos",
+    "universe", "astronaut", "milky way", "black hole", "supernova",
+    "telescope", "solar", "moon", "sun", "mars", "jupiter", "saturn",
+    "earth orbit", "astronomer", "astronomy", "rocket", "nasa", "spacex",
+    "comet", "asteroid", "meteor", "night sky", "timelapse sky",
+    "cosmic", "orbit", "spacecraft", "satellite", "hubble", "stellar",
+}
 
 # Space-specific fallback queries tried in order if topic keywords yield nothing
 SPACE_FALLBACK_QUERIES = [
@@ -55,6 +81,7 @@ class VideoDownloader:
         self.api_key = api_key
         self._headers = {"Authorization": api_key}
         self.extractor = KeywordExtractor()
+        self._used_ids = self._load_used_ids()
 
     # ── PRIMARY METHOD (new workflow) ─────────────────────────────────────────
 
@@ -84,33 +111,67 @@ class VideoDownloader:
         search_queries = []
         if len(keywords) >= 2:
             search_queries.append(f"{keywords[0]} {keywords[1]} space")
-        search_queries.extend(keywords)
+        search_queries.extend([f"{kw} space" for kw in keywords])
         search_queries.extend(SPACE_FALLBACK_QUERIES)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_queries = []
+        for q in search_queries:
+            if q not in seen:
+                seen.add(q)
+                unique_queries.append(q)
 
         video_url = None
         pexels_duration = None
         video_description = ""
+        chosen_video_id = None
 
-        for query in search_queries:
-            logger.info("Searching Pexels: '%s'", query)
+        # --- Pass 1: space-filtered search ---
+        for query in unique_queries:
+            logger.info("Searching Pexels (space-filtered): '%s'", query)
             data = self._search_pexels(query)
             if data:
-                result = self._pick_best_video(data.get("videos", []))
+                result = self._pick_best_video(data.get("videos", []), require_space=True)
                 if result:
-                    video_url, pexels_duration, video_description = result
+                    video_url, pexels_duration, video_description, chosen_video_id = result
                     logger.info(
-                        "Selected video — Pexels duration: %.1fs, description: '%s'",
+                        "Selected video (filtered) id=%s, dur=%.1fs, desc='%s'",
+                        chosen_video_id,
                         pexels_duration,
                         video_description[:80],
                     )
                     break
-            logger.warning("No result for '%s', trying next...", query)
+            logger.warning("No space-filtered result for '%s', trying next...", query)
+
+        # --- Pass 2: relaxed (accept any portrait video) if nothing found above ---
+        if not video_url:
+            logger.warning("Space filter yielded nothing — relaxing content filter.")
+            for query in unique_queries:
+                logger.info("Searching Pexels (relaxed): '%s'", query)
+                data = self._search_pexels(query)
+                if data:
+                    result = self._pick_best_video(data.get("videos", []), require_space=False)
+                    if result:
+                        video_url, pexels_duration, video_description, chosen_video_id = result
+                        logger.info(
+                            "Selected video (relaxed) id=%s, dur=%.1fs, desc='%s'",
+                            chosen_video_id,
+                            pexels_duration,
+                            video_description[:80],
+                        )
+                        break
+                logger.warning("No relaxed result for '%s', trying next...", query)
 
         if not video_url:
             raise RuntimeError("No suitable space video found on Pexels after all queries.")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         self._stream_download(video_url, output_path)
+
+        # Mark this ID as used so it won't be reused in future runs
+        if chosen_video_id:
+            self._mark_used(chosen_video_id)
 
         # Use ffprobe for the real duration (Pexels metadata can be slightly off)
         real_duration = self._probe_duration(output_path) or pexels_duration
@@ -126,7 +187,6 @@ class VideoDownloader:
         Download n unique video clips to use as timeline segments.
         Called AFTER the script is generated in the new workflow.
         """
-        import re
         sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", script.strip()))
         sentences = [s for s in sentences if s.strip()]
 
@@ -168,7 +228,10 @@ class VideoDownloader:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _search_pexels(self, query: str) -> Optional[dict]:
-        params = {"query": query, "per_page": 15, "orientation": "portrait"}
+        # Always ensure "space" is in the query to bias Pexels content
+        if "space" not in query.lower():
+            query = f"{query} space"
+        params = {"query": query, "per_page": 30, "orientation": "portrait"}
         try:
             resp = requests.get(
                 PEXELS_SEARCH_URL,
@@ -183,21 +246,59 @@ class VideoDownloader:
             logger.error("Pexels API error: %s", e)
             return None
 
-    def _pick_best_video(self, videos: list) -> Optional[Tuple[str, float, str]]:
+    def _is_space_related(self, video: dict) -> bool:
+        """Return True if the video's alt/tags contain at least one space keyword."""
+        alt = (video.get("alt") or "").lower()
+        user_name = (video.get("user", {}).get("name") or "").lower()
+        combined = f"{alt} {user_name}"
+        for kw in SPACE_CONTENT_KEYWORDS:
+            if kw in combined:
+                return True
+        return False
+
+    def _pick_best_video(
+        self, videos: list, require_space: bool = True
+    ) -> Optional[Tuple[str, float, str, int]]:
         """
-        Score and select the best video. Returns (url, duration, description).
+        Score and select the best video.
+        Returns (url, duration, description, video_id) or None.
 
         Scoring criteria (higher is better):
           +3  portrait orientation (height > width)
           +2  HD quality file available
           +1  duration between 20-59s (ideal for Shorts)
           -1  very short (<15s) or very long (>70s)
+
+        Selection:
+          Randomly pick from the top-N scored candidates to avoid the same
+          clip being chosen every run.
+
+        Filters applied before scoring:
+          - Skip videos whose ID is already in `used_ids`
+          - Skip videos with no valid download URL
+          - If require_space=True, skip videos with non-space alt text
         """
         if not videos:
             return None
 
         scored = []
         for video in videos:
+            video_id = video.get("id")
+
+            # Skip previously used videos
+            if video_id and str(video_id) in self._used_ids:
+                logger.debug("Skipping already-used video id=%s", video_id)
+                continue
+
+            # Space content filter
+            if require_space and not self._is_space_related(video):
+                logger.debug(
+                    "Skipping non-space video id=%s alt='%s'",
+                    video_id,
+                    str(video.get("alt", ""))[:60],
+                )
+                continue
+
             score = 0
             duration = float(video.get("duration", 0))
 
@@ -234,23 +335,27 @@ class VideoDownloader:
                 best_url = video["video_files"][0]["link"]
 
             if best_url:
-                # Build a description from Pexels metadata
                 user = video.get("user", {}).get("name", "")
                 alt = video.get("alt", "") or ""
                 description = f"{alt} (by {user})".strip(" ()")
-                scored.append((score, duration, best_url, description))
+                scored.append((score, duration, best_url, description, video_id))
 
         if not scored:
             return None
 
-        # Sort by score descending, pick the best
+        # Sort by score descending, then randomly choose from the top-N candidates
         scored.sort(key=lambda x: x[0], reverse=True)
-        best_score, best_duration, best_url, best_desc = scored[0]
+        top_candidates = scored[: min(TOP_N_RANDOM, len(scored))]
+        chosen = random.choice(top_candidates)
+        best_score, best_duration, best_url, best_desc, best_id = chosen
         logger.info(
-            "Video selected: score=%d, duration=%.1fs, desc='%s'",
-            best_score, best_duration, best_desc[:60],
+            "Video selected: id=%s score=%d duration=%.1fs desc='%s'",
+            best_id,
+            best_score,
+            best_duration,
+            best_desc[:60],
         )
-        return best_url, best_duration, best_desc
+        return best_url, best_duration, best_desc, best_id
 
     def _probe_duration(self, path: str) -> Optional[float]:
         """Get exact video duration via ffprobe."""
@@ -280,3 +385,35 @@ class VideoDownloader:
                     if chunk:
                         f.write(chunk)
         logger.info("Video saved to %s", output_path)
+
+    # ── Used-ID persistence ───────────────────────────────────────────────────
+
+    def _load_used_ids(self) -> set:
+        """Load previously used video IDs from disk."""
+        try:
+            if os.path.exists(USED_IDS_PATH):
+                with open(USED_IDS_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    ids = set(str(i) for i in data.get("used_ids", []))
+                    logger.info("Loaded %d used video IDs from history.", len(ids))
+                    return ids
+        except Exception as e:
+            logger.warning("Could not load used_video_ids.json: %s", e)
+        return set()
+
+    def _mark_used(self, video_id) -> None:
+        """Persist a newly used video ID to disk."""
+        str_id = str(video_id)
+        self._used_ids.add(str_id)
+        try:
+            os.makedirs(os.path.dirname(USED_IDS_PATH), exist_ok=True)
+            # Keep only the most recent MAX_USED_IDS entries
+            current_list = list(self._used_ids)
+            if len(current_list) > MAX_USED_IDS:
+                current_list = current_list[-MAX_USED_IDS:]
+                self._used_ids = set(current_list)
+            with open(USED_IDS_PATH, "w", encoding="utf-8") as f:
+                json.dump({"used_ids": current_list}, f, indent=2)
+            logger.info("Marked video id=%s as used (%d total).", str_id, len(current_list))
+        except Exception as e:
+            logger.warning("Could not save used_video_ids.json: %s", e)
