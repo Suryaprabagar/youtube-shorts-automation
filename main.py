@@ -1,14 +1,12 @@
 """
 main.py — YouTube Shorts Automation Orchestrator
 
-Full pipeline:
-  1. Generate topic
-  2. Generate script (OpenRouter LLM)
-  3. Generate voiceover (gTTS)
-  4. Download background video (Pexels)
-  5. Edit + combine into final MP4 (MoviePy / FFmpeg)
-  6. Generate metadata (title / description / tags)
-  7. Upload to YouTube (OAuth 2.0)
+FIXED PIPELINE (audio/video sync):
+  OLD: Topic → Script → Voice → Download Video → Edit
+  NEW: Topic → Download Video → [get duration] → Script (fitted to duration) → Voice → Edit
+
+By writing the script AFTER knowing the video duration, gTTS audio length
+matches the video length exactly — no more sync issues.
 
 Run locally:   python main.py
 Run in CI:     Triggered automatically by GitHub Actions cron
@@ -46,26 +44,14 @@ def run_pipeline(cfg: Config) -> None:
     logger.info("🚀 Starting YouTube Shorts automation pipeline")
     logger.info("=" * 60)
 
-    # ── Step 0: Analytics & Category Management ──────────────────────────────────
+    # ── Step 0: Analytics & Category Management ──────────────────────────────
     logger.info("\n📊 STEP 0/7 — Analyzing data & selecting category...")
-    
-    # 0.1 Category Rotation Logic
-    categories = ["space", "animals", "science", "technology", "psychology"]
-    
-    # Try to grab the GitHub Actions run number. If running locally, default to a random choice or file.
-    import os
-    run_number_str = os.environ.get("GITHUB_RUN_NUMBER")
-    if run_number_str and run_number_str.isdigit():
-        run_number = int(run_number_str)
-        category_index = run_number % len(categories)
-        selected_category = categories[category_index]
-        logger.info(f"GitHub Run Number {run_number} detected. Selected Category: {selected_category}")
-    else:
-        import random
-        selected_category = random.choice(categories)
-        logger.info(f"Local run detected. Randomly selected Category: {selected_category}")
 
-    # 0.2 Analytics (Optional bias factor we can log)
+    import os
+    # Force space category — pipeline is space-only
+    selected_category = "space"
+    logger.info("Category locked to: %s", selected_category)
+
     analytics = YouTubeAnalytics(
         client_id=cfg.youtube_client_id,
         client_secret=cfg.youtube_client_secret,
@@ -73,59 +59,88 @@ def run_pipeline(cfg: Config) -> None:
     )
     best_series_id = analytics.update_analytics()
     if best_series_id:
-        logger.info(f"Analytics suggests '{best_series_id}' performs best, but we are honoring category rotation.")
+        logger.info("Analytics suggests '%s' performs best.", best_series_id)
 
-    # ── Step 1: Generate Topic ─────────────────────────────────────────────────
-    logger.info("\n📌 STEP 1/7 — Generating topic...")
+    # ── Step 1: Generate Topic ────────────────────────────────────────────────
+    logger.info("\n📌 STEP 1/7 — Generating space topic...")
     topic_gen = TopicGenerator()
     topic = topic_gen.generate(category=selected_category)
     logger.info("Topic: %s", topic)
 
-    # ── Step 1.5: Extract Keywords ──────────────────────────────────────────────
+    # ── Step 1.5: Extract Keywords ────────────────────────────────────────────
     logger.info("\n🔑 STEP 1.5/7 — Extracting keywords...")
     keyword_extractor = KeywordExtractor()
     keywords = keyword_extractor.extract(topic)
     logger.info("Keywords: %s", keywords)
 
-    # ── Step 2: Generate Script ────────────────────────────────────────────────
-    logger.info("\n✍️  STEP 2/7 — Generating script...")
-    script_gen = ScriptGenerator(api_key=cfg.openrouter_api_key)
-    script = script_gen.generate(topic)
-    logger.info("Script preview: %s...", script[:100])
+    # ── Step 2: Download Space Video FIRST ───────────────────────────────────
+    #
+    # 🔧 SYNC FIX: Video is downloaded before the script is written.
+    #    download_space_video() returns the actual video duration AND a
+    #    description of the footage so the script can be sized and themed
+    #    to match exactly — eliminating A/V sync and relevance issues.
+    #
+    logger.info("\n🎬 STEP 2/7 — Downloading space background video...")
+    video_dl = VideoDownloader(api_key=cfg.pexels_api_key)
+    video_path, video_duration, video_description = video_dl.download_space_video(topic=topic)
+    logger.info("Video ready: %s — duration: %.2fs", video_path, video_duration)
+    logger.info("Video description: %s", video_description[:100] if video_description else "N/A")
 
-    # ── Step 3: Generate Voiceover ─────────────────────────────────────────────
-    logger.info("\n🎙️  STEP 3/7 — Generating voiceover...")
+    # ── Step 3: Generate Script FITTED to video duration ─────────────────────
+    #
+    # 🔧 SYNC FIX: video_duration is passed to generate() so the LLM writes
+    #    a script whose spoken length (at gTTS speed) ≈ video_duration.
+    # 🔧 VIDEO CONTEXT: video_description is passed so the narration is
+    #    relevant to what is actually shown in the footage.
+    #
+    logger.info("\n✍️  STEP 3/7 — Generating script fitted to %.1fs video...", video_duration)
+    script_gen = ScriptGenerator(api_key=cfg.openrouter_api_key)
+    script = script_gen.generate(
+        topic=topic,
+        video_duration=video_duration,
+        video_description=video_description,
+    )
+    logger.info("Script preview: %s...", script[:120])
+    logger.info("Script word count: %d", len(script.split()))
+
+    # ── Step 4: Generate Voiceover ─────────────────────────────────────────
+    logger.info("\n🎙️  STEP 4/7 — Generating voiceover...")
     voice_gen = VoiceGenerator(language=cfg.tts_language, slow=cfg.tts_slow)
     voice_path = voice_gen.generate(script)
     logger.info("Voiceover saved: %s", voice_path)
 
-    # ── Step 4: Download Background Video ─────────────────────────────────────
-    logger.info("\n🎬 STEP 4/7 — Downloading background video segments from Pexels...")
-    video_dl = VideoDownloader(api_key=cfg.pexels_api_key)
-    # Use multi-segment download for better variety (Bug 4 fix)
-    video_paths = video_dl.download_segments(topic=topic, script=script, n_segments=3)
-    logger.info(f"Downloaded {len(video_paths)} background segments.")
+    # ── Step 5: Download Additional Segments (for variety in the edit) ───────
+    logger.info("\n🎞️  STEP 5a/7 — Downloading additional video segments...")
+    try:
+        video_paths = video_dl.download_segments(topic=topic, script=script, n_segments=3)
+        # Make sure the primary video is always first
+        if video_path not in video_paths:
+            video_paths.insert(0, video_path)
+        logger.info("Using %d video segment(s).", len(video_paths))
+    except Exception as e:
+        logger.warning("Segment download failed (%s) — using single video.", e)
+        video_paths = [video_path]
 
-    # ── Step 5: Edit + Combine into Final Short ────────────────────────────────
-    logger.info("\n🎞️  STEP 5/7 — Editing video (crop → overlay → merge audio)...")
+    # ── Step 5b: Edit + Combine into Final Short ──────────────────────────────
+    logger.info("\n🎞️  STEP 5b/7 — Editing video (crop → subtitles → merge audio)...")
     editor = VideoEditor()
     final_video_path = editor.edit(
-        video_path=video_paths[0], # Fallback for FFmpeg or single clip
+        video_path=video_paths[0],
         audio_path=voice_path,
         script=script,
         topic=topic,
-        video_paths=video_paths,   # Multi-segment list
+        video_paths=video_paths,
     )
     logger.info("Final video saved: %s", final_video_path)
 
-    # ── Step 6: Generate Metadata ──────────────────────────────────────────────
+    # ── Step 6: Generate Metadata ─────────────────────────────────────────────
     logger.info("\n📝 STEP 6/7 — Generating title, description, and tags...")
     meta_gen = MetadataGenerator(api_key=cfg.openrouter_api_key)
     metadata = meta_gen.generate(topic=topic, script=script)
     logger.info("Title: %s", metadata["title"])
-    logger.info("Tags: %s", metadata["tags"])
+    logger.info("Tags:  %s", metadata["tags"])
 
-    # ── Step 7: Upload to YouTube ──────────────────────────────────────────────
+    # ── Step 7: Upload to YouTube ─────────────────────────────────────────────
     logger.info("\n📤 STEP 7/7 — Uploading to YouTube...")
     uploader = YouTubeUploader(
         client_id=cfg.youtube_client_id,

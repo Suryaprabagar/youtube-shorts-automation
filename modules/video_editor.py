@@ -4,60 +4,68 @@ Assembles the final YouTube Short by combining background video + voiceover.
 
 Pipeline:
   1. Load background video → resize/crop to 1080×1920 (9:16 portrait)
-  2. Load audio track from voiceover MP3
-  3. Loop or trim the video to match audio duration (capped at 59s)
-  4. Overlay a semi-transparent title card with the topic text
-  5. Export final MP4 using H.264 + AAC at 30fps
+  2. Concatenate multiple segments for visual variety
+  3. Load audio track from voiceover MP3
+  4. Loop or trim the video to match audio duration (capped at 59s)
+  5. Export a clean MP4 (no text via MoviePy - no ImageMagick needed)
+  6. Burn subtitles via FFmpeg drawtext post-pass (pure FFmpeg, no ImageMagick)
 
-Primary engine: MoviePy
-Fallback engine: FFmpeg subprocess (if MoviePy fails)
+Primary engine: MoviePy (video/audio compositing, no text)
+Subtitle burn:  FFmpeg drawtext (reliable, no ImageMagick dependency)
+Fallback:       FFmpeg subprocess for full encode + subtitle burn
 """
 
 import logging
 import os
-import textwrap
 import subprocess
+import tempfile
 from typing import Optional, List
 import PIL.Image
 
 # Monkeypatch for MoviePy 1.0.3 + Pillow 10+ compatibility
-if not hasattr(PIL.Image, 'ANTIALIAS'):
+if not hasattr(PIL.Image, "ANTIALIAS"):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
 import config as cfg
 from modules.subtitle_generator import SubtitleGenerator
-from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, CompositeAudioClip
+from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
 from moviepy.audio.fx.all import audio_loop, volumex
 
 logger = logging.getLogger(__name__)
 
+# Path to DejaVu font — installed by the workflow via fonts-dejavu-extra
+DEJAVU_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+# Windows fallback (for local dev)
+DEJAVU_FONT_WIN = "C:/Windows/Fonts/arial.ttf"
+
 
 class VideoEditor:
-    """Combines video + audio and exports a YouTube Shorts-ready MP4."""
+    """Combines video + audio, then burns subtitles via FFmpeg."""
 
     def __init__(self):
-        self.width = cfg.SHORTS_WIDTH     # 1080
-        self.height = cfg.SHORTS_HEIGHT   # 1920
-        self.fps = cfg.SHORTS_FPS         # 30
-        self.max_duration = cfg.SHORTS_MAX_DURATION  # Use config value (e.g. 59s)
+        self.width = cfg.SHORTS_WIDTH      # 1080
+        self.height = cfg.SHORTS_HEIGHT    # 1920
+        self.fps = cfg.SHORTS_FPS          # 30
+        self.max_duration = cfg.SHORTS_MAX_DURATION  # 59s
 
     def edit(
         self,
         video_path: str = cfg.VIDEO_RAW_PATH,
         audio_path: str = cfg.VOICE_PATH,
         output_path: str = cfg.FINAL_VIDEO_PATH,
-        script: str = "",  # Added script
+        script: str = "",
         topic: str = "",
-        video_paths: Optional[List[str]] = None, # Added multi-segment support
+        video_paths: Optional[List[str]] = None,
     ) -> str:
         """
-        Create the final Short MP4.
+        Create the final Short MP4 with burned-in subtitles.
 
         Args:
-            video_path: Path to background video (fallback).
-            audio_path: Path to voiceover MP3.
+            video_path:  Path to background video (fallback).
+            audio_path:  Path to voiceover MP3.
             output_path: Destination for final MP4.
-            topic: Topic text to overlay as title card.
+            script:      Voiceover text (used for subtitle generation).
+            topic:       Video topic (unused for rendering, kept for compat).
             video_paths: Optional list of segment video paths.
 
         Returns:
@@ -65,64 +73,84 @@ class VideoEditor:
         """
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+        # Use a temp path for the clean (no subtitles) intermediate video
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp4", dir=os.path.dirname(output_path))
+        os.close(tmp_fd)
+
         try:
-            return self._edit_with_moviepy(video_path, audio_path, output_path, script, topic, video_paths)
+            # Step A: compose video + audio with MoviePy (no text rendering)
+            self._compose_with_moviepy(
+                video_path=video_path,
+                audio_path=audio_path,
+                output_path=tmp_path,
+                video_paths=video_paths,
+            )
+
+            # Step B: burn subtitles via FFmpeg drawtext if we have a script
+            if script and script.strip():
+                self._burn_subtitles_ffmpeg(
+                    input_path=tmp_path,
+                    output_path=output_path,
+                    script=script,
+                    audio_path=audio_path,
+                )
+            else:
+                # No subtitles — just rename the intermediate file
+                os.replace(tmp_path, output_path)
+                tmp_path = None  # already moved
+
         except Exception as e:
-            logger.warning("MoviePy failed (%s). Falling back to FFmpeg.", e)
-            return self._edit_with_ffmpeg(video_path, audio_path, output_path)
+            logger.warning("MoviePy compose failed (%s). Falling back to pure FFmpeg.", e)
+            try:
+                self._edit_with_ffmpeg_full(
+                    video_path=video_path,
+                    audio_path=audio_path,
+                    output_path=output_path,
+                    script=script,
+                    video_paths=video_paths,
+                )
+            except Exception as fe:
+                logger.error("FFmpeg fallback also failed: %s", fe)
+                raise
+        finally:
+            # Clean up temp file if it still exists
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
-    # ── MoviePy path ───────────────────────────────────────────────────────────
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        logger.info("Final video saved (%.1f MB): %s", size_mb, output_path)
+        return output_path
 
-    def _edit_with_moviepy(
+    # ── MoviePy: video + audio compositing ONLY (no text/ImageMagick) ─────────
+
+    def _compose_with_moviepy(
         self,
         video_path: str,
         audio_path: str,
         output_path: str,
-        script: str,
-        topic: str,
         video_paths: Optional[List[str]] = None,
-    ) -> str:
+    ) -> None:
         from moviepy.editor import (
             VideoFileClip, AudioFileClip, CompositeVideoClip,
-            TextClip, ColorClip, concatenate_videoclips
+            concatenate_videoclips,
         )
 
-        logger.info("Editing video with MoviePy...")
+        logger.info("Compositing video + audio with MoviePy...")
 
         # Load audio and clamp duration
         voice_clip = AudioFileClip(audio_path)
         target_duration = min(voice_clip.duration, self.max_duration)
-        if target_duration < 6.0:
-            logger.warning("Audio duration %.1fs is less than 6s constraint.", target_duration)
-        
         voice_clip = voice_clip.subclip(0, target_duration)
 
-        # Mix with Background Music if available
-        bg_music_dir = "assets/music"
-        bg_music_clip = None
-        if os.path.exists(bg_music_dir) and os.path.isdir(bg_music_dir):
-            import random
-            music_files = [f for f in os.listdir(bg_music_dir) if f.endswith(('.mp3', '.wav', '.m4a'))]
-            if music_files:
-                music_file = random.choice(music_files)
-                bg_music_path = os.path.join(bg_music_dir, music_file)
-                logger.info(f"Using background music: {bg_music_path}")
-                try:
-                    bg_music_clip = AudioFileClip(bg_music_path)
-                    bg_music_clip = audio_loop(bg_music_clip, duration=target_duration)
-                    bg_music_clip = volumex(bg_music_clip, 0.15)
-                    final_audio = CompositeAudioClip([voice_clip, bg_music_clip])
-                except Exception as e:
-                    logger.error(f"Failed to mix background music: {e}")
-                    final_audio = voice_clip
-            else:
-                final_audio = voice_clip
-        else:
-            final_audio = voice_clip
+        # Optional background music mix
+        final_audio = self._mix_audio(voice_clip, target_duration)
 
-        # Load background video(s)
+        # Load and concatenate background video segments
         if video_paths and len(video_paths) > 0:
-            logger.info(f"Concatenating {len(video_paths)} video segments...")
+            logger.info("Concatenating %d video segments...", len(video_paths))
             segment_clips = []
             segment_duration = target_duration / len(video_paths)
             for path in video_paths:
@@ -134,36 +162,14 @@ class VideoEditor:
             bg_clip = VideoFileClip(video_path, audio=False)
             bg_clip = self._resize_crop(bg_clip, target_duration)
 
-        # Ensure bg_clip duration matches target exactly
         bg_clip = bg_clip.set_duration(target_duration)
 
-        # Build layers
-        layers = [bg_clip]
-        
-        # Add subtitles using manual SubtitleGenerator
-        captions_added = False
-        try:
-            if script:
-                caption_clips = self._generate_subtitles(script, target_duration)
-                if caption_clips:
-                    layers.extend(caption_clips)
-                    captions_added = True
-        except Exception as e:
-            logger.error(f"Captions failed: {e}")
-                
-        if not captions_added and topic:
-            logger.info("Using static title card fallback")
-            title_layer = self._build_title_overlay(topic, target_duration)
-            if title_layer:
-                layers.append(title_layer)
-
-        # Composite + attach audio
-        final = CompositeVideoClip(layers, size=(self.width, self.height))
+        # Composite video (background only — no text overlays)
+        final = CompositeVideoClip([bg_clip], size=(self.width, self.height))
         final = final.set_audio(final_audio)
         final = final.set_duration(target_duration)
 
-        # Export
-        logger.info("Exporting final video to '%s'...", output_path)
+        logger.info("Exporting clean video to '%s'...", output_path)
         final.write_videofile(
             output_path,
             fps=self.fps,
@@ -177,164 +183,117 @@ class VideoEditor:
             logger=None,
         )
 
-        # Cleanup clips
+        # Cleanup
         for clip in [final, voice_clip, final_audio, bg_clip]:
             try:
                 clip.close()
             except Exception:
                 pass
 
-        size_mb = os.path.getsize(output_path) / (1024 * 1024)
-        logger.info("Final video saved (%.1f MB, %.1fs).", size_mb, target_duration)
-        return output_path
+        logger.info("Clean video exported.")
 
-    def _resize_crop(self, clip, target_duration):
-        """Resize and center-crop clip to 1080×1920. Loop if shorter than target."""
-        from moviepy.editor import vfx
+    # ── FFmpeg: subtitle burn-in ───────────────────────────────────────────────
 
-        # Loop if video is shorter than needed
-        if clip.duration < target_duration:
-            n_loops = int(target_duration / clip.duration) + 2
-            clip = clip.loop(n_loops)
+    def _burn_subtitles_ffmpeg(
+        self,
+        input_path: str,
+        output_path: str,
+        script: str,
+        audio_path: str,
+    ) -> None:
+        """
+        Burn subtitles into the clean video using FFmpeg drawtext filter.
+        This approach requires NO ImageMagick — pure FFmpeg only.
+        """
+        logger.info("Burning subtitles via FFmpeg drawtext...")
 
-        clip = clip.subclip(0, target_duration)
+        # Get real audio duration for subtitle timing
+        duration = self._probe_duration(audio_path) or self.max_duration
+        duration = min(duration, self.max_duration)
 
-        # Scale so the shortest dimension matches our target, then crop
-        clip_ratio = clip.w / clip.h
-        target_ratio = self.width / self.height
+        # Generate subtitle timing data
+        gen = SubtitleGenerator()
+        subtitles = gen.generate(script, duration)
 
-        if clip_ratio > target_ratio:
-            # Video is wider than target → scale to height, crop width
-            new_h = self.height
-            new_w = int(clip.w * (self.height / clip.h))
-        else:
-            # Video is taller/squarer → scale to width, crop height
-            new_w = self.width
-            new_h = int(clip.h * (self.width / clip.w))
+        if not subtitles:
+            logger.warning("No subtitles generated — copying video as-is.")
+            os.replace(input_path, output_path)
+            return
 
-        clip = clip.resize((new_w, new_h))
-
-        # Center crop
-        x_center = clip.w / 2
-        y_center = clip.h / 2
-        clip = clip.crop(
-            x_center=x_center,
-            y_center=y_center,
-            width=self.width,
-            height=self.height,
+        # Build FFmpeg drawtext filter
+        font_path = DEJAVU_FONT if os.path.exists(DEJAVU_FONT) else DEJAVU_FONT_WIN
+        drawtext_filter = gen.to_ffmpeg_drawtext(
+            subtitles,
+            video_width=self.width,
+            video_height=self.height,
         )
-        return clip
 
-    def _build_title_overlay(self, topic: str, duration: float) -> Optional[object]:
-        """Build a centered, wrapped title card with a dark gradient background."""
-        try:
-            from moviepy.editor import TextClip, ColorClip, CompositeVideoClip
+        # Override font path with the discovered one
+        drawtext_filter = drawtext_filter.replace(
+            SubtitleGenerator.FONT_PATH, font_path
+        )
 
-            # Wrap long topics
-            wrapped = "\n".join(textwrap.wrap(topic, width=30))
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-vf", drawtext_filter,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-b:v", cfg.SHORTS_VIDEO_BITRATE,
+            "-c:a", "copy",           # audio already encoded — just copy
+            "-r", str(self.fps),
+            output_path,
+        ]
 
-            text_clip = TextClip(
-                wrapped,
-                fontsize=60,
-                color="white",
-                font="DejaVu-Sans-Bold",
-                align="center",
-                method="caption",
-                size=(self.width - 80, None),
-            ).set_position(("center", 0.72), relative=True).set_duration(duration)
+        logger.info("Running FFmpeg subtitle burn...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error("FFmpeg drawtext failed:\n%s", result.stderr[-2000:])
+            # Fallback: just use the clean video without subtitles
+            logger.warning("Falling back to video without subtitles.")
+            os.replace(input_path, output_path)
+        else:
+            logger.info("Subtitles burned successfully via FFmpeg.")
 
-            # Dark bar behind text for readability
-            bar_height = 200
-            bar = (
-                ColorClip(size=(self.width, bar_height), color=(0, 0, 0))
-                .set_opacity(0.55)
-                .set_position(("center", 0.70), relative=True)
-                .set_duration(duration)
-            )
+    # ── Full FFmpeg fallback (when MoviePy breaks) ────────────────────────────
 
-            return CompositeVideoClip([bar, text_clip], size=(self.width, self.height))
-        except Exception as e:
-            logger.warning("Could not render title overlay: %s", e)
-            return None
-
-    def _generate_subtitles(self, script_text: str, duration: float):
-        """
-        Uses SubtitleGenerator to chunk text and creates TextClips for each phrase.
-        Returns a list of clips to layer onto the video.
-        """
-        from moviepy.editor import TextClip
-        
-        generator = SubtitleGenerator()
-        subtitles_data = generator.generate(script_text, duration)
-        
-        clips = []
-        for start_time, end_time, text in subtitles_data:
-            dur = end_time - start_time
-            if dur <= 0:
-                continue
-                
-            try:
-                # Shorts style: Short phrases, bottom-center, white text with black outline
-                tc = TextClip(
-                    text.strip(),
-                    fontsize=60,
-                    color="white",
-                    font="DejaVu-Sans-Bold",
-                    stroke_color="black",
-                    stroke_width=2,
-                    method="caption",
-                    size=(self.width * 0.9, None)
-                ).set_position(("center", 0.75), relative=True).set_start(start_time).set_duration(dur)
-                clips.append(tc)
-            except Exception as e:
-                logger.error(f"Failed to generate subtitle clip for '{text}': {e}")
-                # Fallback style without background
-                tc = TextClip(
-                    text.strip(),
-                    fontsize=60,
-                    color="white",
-                    method="caption",
-                    size=(self.width * 0.9, None)
-                ).set_position(("center", 0.75), relative=True).set_start(start_time).set_duration(dur)
-                clips.append(tc)
-
-        logger.info(f"Generated {len(clips)} subtitle overlays.")
-        return clips
-
-    # ── FFmpeg fallback path ───────────────────────────────────────────────────
-
-    def _edit_with_ffmpeg(
+    def _edit_with_ffmpeg_full(
         self,
         video_path: str,
         audio_path: str,
         output_path: str,
-    ) -> str:
+        script: str = "",
+        video_paths: Optional[List[str]] = None,
+    ) -> None:
         """
-        Fallback: use FFmpeg CLI to merge video + audio and crop to 9:16.
-        No text overlay in fallback mode.
+        Full fallback using only FFmpeg: merge video + audio + optional subtitles.
         """
-        logger.info("Editing video with FFmpeg fallback...")
+        logger.info("Falling back to full FFmpeg encode...")
 
-        # First get audio duration
-        probe_cmd = [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            audio_path,
-        ]
-        result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
-        audio_dur = min(float(result.stdout.strip()), self.max_duration)
+        # If multiple segments, concatenate first
+        if video_paths and len(video_paths) > 1:
+            concat_path = output_path.replace(".mp4", "_concat.mp4")
+            self._ffmpeg_concat(video_paths, concat_path)
+            src_video = concat_path
+        else:
+            src_video = video_path
 
-        # FFmpeg filter: scale + crop to 1080x1920, loop video, trim to audio duration
+        # Probe audio duration
+        audio_dur = min(self._probe_duration(audio_path) or 45.0, self.max_duration)
+
         vf = (
             f"scale=w={self.width}:h={self.height}:force_original_aspect_ratio=increase,"
             f"crop={self.width}:{self.height}"
         )
 
+        # Encode clean video + audio
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp4", dir=os.path.dirname(output_path))
+        os.close(tmp_fd)
+
         cmd = [
             "ffmpeg", "-y",
-            "-stream_loop", "-1",          # loop video indefinitely
-            "-i", video_path,
+            "-stream_loop", "-1",
+            "-i", src_video,
             "-i", audio_path,
             "-vf", vf,
             "-t", str(audio_dur),
@@ -347,12 +306,106 @@ class VideoEditor:
             "-shortest",
             "-map", "0:v:0",
             "-map", "1:a:0",
-            output_path,
+            tmp_path,
         ]
-
-        logger.info("Running FFmpeg: %s", " ".join(cmd))
         subprocess.run(cmd, check=True, capture_output=True)
+
+        # Burn subtitles if we have a script
+        if script and script.strip():
+            self._burn_subtitles_ffmpeg(tmp_path, output_path, script, audio_path)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        else:
+            os.replace(tmp_path, output_path)
 
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
         logger.info("FFmpeg output saved: '%s' (%.1f MB).", output_path, size_mb)
-        return output_path
+
+    def _ffmpeg_concat(self, video_paths: List[str], output_path: str) -> None:
+        """Concatenate multiple video files into one using FFmpeg concat demuxer."""
+        list_fd, list_path = tempfile.mkstemp(suffix=".txt")
+        try:
+            with os.fdopen(list_fd, "w") as f:
+                for p in video_paths:
+                    f.write(f"file '{p}'\n")
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", list_path,
+                "-c", "copy",
+                output_path,
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
+        finally:
+            if os.path.exists(list_path):
+                os.remove(list_path)
+
+    # ── Shared helpers ─────────────────────────────────────────────────────────
+
+    def _resize_crop(self, clip, target_duration):
+        """Resize and center-crop clip to 1080×1920. Loop if shorter than target."""
+        from moviepy.editor import vfx
+
+        if clip.duration < target_duration:
+            n_loops = int(target_duration / clip.duration) + 2
+            clip = clip.loop(n_loops)
+
+        clip = clip.subclip(0, target_duration)
+
+        clip_ratio = clip.w / clip.h
+        target_ratio = self.width / self.height
+
+        if clip_ratio > target_ratio:
+            new_h = self.height
+            new_w = int(clip.w * (self.height / clip.h))
+        else:
+            new_w = self.width
+            new_h = int(clip.h * (self.width / clip.w))
+
+        clip = clip.resize((new_w, new_h))
+        clip = clip.crop(
+            x_center=clip.w / 2,
+            y_center=clip.h / 2,
+            width=self.width,
+            height=self.height,
+        )
+        return clip
+
+    def _mix_audio(self, voice_clip, target_duration):
+        """Mix voiceover with optional background music."""
+        bg_music_dir = "assets/music"
+        if os.path.exists(bg_music_dir) and os.path.isdir(bg_music_dir):
+            import random
+            music_files = [
+                f for f in os.listdir(bg_music_dir) if f.endswith((".mp3", ".wav", ".m4a"))
+            ]
+            if music_files:
+                music_file = random.choice(music_files)
+                bg_path = os.path.join(bg_music_dir, music_file)
+                logger.info("Using background music: %s", bg_path)
+                try:
+                    bg_clip = AudioFileClip(bg_path)
+                    bg_clip = audio_loop(bg_clip, duration=target_duration)
+                    bg_clip = volumex(bg_clip, 0.15)
+                    return CompositeAudioClip([voice_clip, bg_clip])
+                except Exception as e:
+                    logger.error("Failed to mix background music: %s", e)
+        return voice_clip
+
+    def _probe_duration(self, path: str) -> Optional[float]:
+        """Get exact duration via ffprobe."""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    path,
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            return float(result.stdout.strip())
+        except Exception as e:
+            logger.warning("ffprobe failed: %s", e)
+            return None

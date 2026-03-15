@@ -60,33 +60,12 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             ffmpeg \
-            imagemagick \
             fonts-dejavu-core \
             fonts-dejavu-extra
-
-          # ── Fix ImageMagick policy so MoviePy can render text ──────────────
-          # Replaces the blanket "none" rights on @* with read|write
-          POLICY_FILE="/etc/ImageMagick-6/policy.xml"
-          if [ -f "$POLICY_FILE" ]; then
-            sudo sed -i \
-              's#<policy domain="coder" rights="none" pattern="@\*"/>#<policy domain="coder" rights="read|write" pattern="@*"/>#g' \
-              "$POLICY_FILE"
-            # Also allow TEXT and LABEL coders used by MoviePy TextClip
-            sudo sed -i \
-              's|<policy domain="coder" rights="none" pattern="TEXT"/>||g' \
-              "$POLICY_FILE"
-            sudo sed -i \
-              's|<policy domain="coder" rights="none" pattern="LABEL"/>||g' \
-              "$POLICY_FILE"
-            echo "ImageMagick policy patched."
-          else
-            echo "ImageMagick policy file not found — skipping patch."
-          fi
 
           # ── Verify critical tools are available ───────────────────────────
           ffmpeg -version | head -1
           ffprobe -version | head -1
-          convert -version | head -1
           fc-list | grep -i dejavu | head -3
 
       # ── 5. Install Python dependencies ────────────────────────────────────
