@@ -57,9 +57,13 @@ def run_pipeline(cfg: Config) -> None:
         client_secret=cfg.youtube_client_secret,
         refresh_token=cfg.youtube_refresh_token,
     )
-    best_series_id = analytics.update_analytics()
-    if best_series_id:
-        logger.info("Analytics suggests '%s' performs best.", best_series_id)
+    try:
+        best_series_id = analytics.update_analytics()
+        if best_series_id:
+            logger.info("Analytics suggests '%s' performs best.", best_series_id)
+    except Exception as e:
+        logger.warning("Step 0 (Analytics) failed, but continuing pipeline: %s", e)
+        best_series_id = None
 
     # ── Step 1: Generate Topic ────────────────────────────────────────────────
     logger.info("\n📌 STEP 1/7 — Generating space topic...")

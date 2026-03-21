@@ -70,7 +70,7 @@ class YouTubeAnalytics:
         retry=retry_if_exception_type(Exception),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=2, max=10),
-        reraise=False, # We don't want analytics failure to crash the pipeline
+        reraise=True, # Allow main.py to catch the actual RefreshError
     )
     def update_analytics(self) -> str | None:
         """
