@@ -52,28 +52,38 @@ class MetadataGenerator:
         )
 
     @retry(
-        retry=retry_if_exception_type((Exception)),
+        retry=retry_if_exception_type(Exception),
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=False
+        wait=wait_exponential(multiplier=2, min=2, max=10),
+        reraise=True # Crucial: Let generate() see the actual error for fallback logic
     )
     def _call_model(self, topic: str, script: str, model: str) -> dict:
         """Internal method to call the LLM for metadata generation."""
         script_excerpt = script[:300].strip()
         logger.info("Generating metadata with model: %s", model)
+        
         response = self._client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": METADATA_PROMPT_TEMPLATE.format(
                 topic=topic, script=script_excerpt)}],
-            max_tokens=500,
+            max_tokens=600,
             temperature=0.7,
         )
+        
+        if not response.choices:
+            logger.warning("Model %s returned no choices.", model)
+            raise ValueError("Empty response from model")
+
         raw_content = response.choices[0].message.content
         if not raw_content:
+            logger.warning("Model %s returned None content.", model)
             raise ValueError("Model returned empty or None content")
+            
         raw = raw_content.strip()
+        logger.debug("Raw Metadata Response: %s", raw)
+        
         metadata = self._parse_and_validate(raw, topic)
-        logger.info("Metadata generated — title: '%s'", metadata["title"])
+        logger.info("Metadata generated успешно — title: '%s'", metadata["title"])
         return metadata
 
     def generate(self, topic: str, script: str) -> dict:
@@ -87,11 +97,18 @@ class MetadataGenerator:
                     logger.info("Trying model '%s' for metadata...", model)
                     return self._call_model(topic, script, model)
                 except Exception as e:
-                    err = str(e)
-                    if any(code in err for code in ["400", "402", "404", "429"]) or "No endpoints" in err:
-                        logger.warning("Model '%s' skipped (%s)", model, err[:80])
+                    err = str(e).lower()
+                    # Catch clear "skip" signals from the API
+                    is_skippable = any(code in err for code in ["400", "401", "402", "403", "404", "408", "429"])
+                    is_skippable = is_skippable or any(msg in err for msg in ["rate limit", "not found", "insufficient", "no endpoint", "timeout"])
+                    
+                    if is_skippable:
+                        logger.warning("Model '%s' skipped (Expected API error: %s)", model, err[:100])
                         continue
-                    logger.error("Metadata generator failed on model '%s': %s", model, err)
+                        
+                    logger.error("Metadata generator encountered unexpected error on model '%s': %s", model, err)
+                    # We still continue to the next model for ANY error in the loop
+                    continue
                     
             logger.error("All OpenRouter models failed for metadata.")
             raise RuntimeError("API failed")

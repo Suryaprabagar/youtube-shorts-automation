@@ -43,11 +43,12 @@ OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 OPENROUTER_FALLBACK_MODELS = [
     "mistralai/mistral-small-3.1-24b-instruct:free",
     "google/gemma-3-12b-it:free",
-    "qwen/qwen-2.5-7b-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "qwen/qwen-2.5-coder-32b-instruct:free",
     "liquid/lfm-2.5-1.2b-instruct:free",
+    "google/gemma-2-9b-it:free",
     "deepseek/deepseek-r1:free",
     "nousresearch/hermes-3-llama-3.1-405b:free",
-    "meta-llama/llama-3.2-3b-instruct:free",
     "openai/gpt-oss-120b:free",
     "openrouter/free", # Last resort: auto-route to any available free model
 ]

@@ -128,17 +128,15 @@ class ScriptGenerator:
                 )
                 return script
             except Exception as e:
-                err = str(e)
-                if (
-                    any(code in err for code in ["400", "402", "404", "429"])
-                    or "No endpoints" in err
-                    or "rate-limit" in err.lower()
-                    or "empty or none" in err.lower()
-                    or "NoneType" in err
-                ):
-                    logger.warning("Model '%s' skipped (%s), trying next...", model, err[:80])
+                err = str(e).lower()
+                is_skippable = any(code in err for code in ["400", "401", "402", "403", "404", "408", "429"])
+                is_skippable = is_skippable or any(msg in err for msg in ["rate limit", "not found", "insufficient", "no endpoint", "timeout"])
+                
+                if is_skippable:
+                    logger.warning("Model '%s' skipped (Expected API error: %s), trying next...", model, err[:100])
                     continue
                 logger.error("Model '%s' failed unexpectedly: %s", model, err)
+                continue
 
         logger.warning("All models failed — using fallback script.")
         return self._fallback_script(topic, target_words)
